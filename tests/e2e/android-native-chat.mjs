@@ -11,6 +11,8 @@ if(!/^emulator-\d+$/.test(serial))throw Error('Use a dedicated Android emulator;
 const sdk=process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT;
 const adb=process.env.ADB || (sdk?path.join(sdk,'platform-tools/adb'):'adb');
 const oracle=JSON.parse(fs.readFileSync(process.env.DUGA_CHAT_ORACLE || 'native/vulkan/build/chat-oracle.json','utf8'));
+const followup=process.env.DUGA_CHAT_FOLLOWUP_ORACLE?JSON.parse(fs.readFileSync(process.env.DUGA_CHAT_FOLLOWUP_ORACLE,'utf8')):null;
+if(followup){assert.equal(followup.previous.prompt,oracle.prompt);assert.equal(followup.previous.text,oracle.text);assert.deepEqual(followup.previous.tokens,oracle.tokens);}
 if(typeof oracle.prompt!=='string'||typeof oracle.text!=='string'||!oracle.text)throw Error('Generate a non-empty original WebGPU chat oracle first.');
 const timeout=Number(process.env.DUGA_ANDROID_CHAT_TIMEOUT_MS || 20*60*1000);
 if(!Number.isFinite(timeout)||timeout<1000||timeout>2*60*60*1000)throw Error('Invalid chat-test timeout');
@@ -22,7 +24,12 @@ function command(...args){
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 command('shell','am','force-stop','app.duga.android');
 command('shell','am','start','-n','app.duga.android/app.duga.android.MainActivity');
-const pid=command('shell','pidof','app.duga.android');
+let pid='';
+for(let i=0;i<60;i++){
+  const result=spawnSync(adb,['-s',serial,'shell','pidof','app.duga.android'],{encoding:'utf8',timeout:10000});
+  if(result.status===0&&/^\d+$/.test(result.stdout.trim())){pid=result.stdout.trim();break;}
+  await delay(500);
+}
 if(!/^\d+$/.test(pid))throw Error('Duga did not start');
 const port=command('forward','tcp:0',`localabstract:webview_devtools_remote_${pid}`);
 if(!/^\d+$/.test(port))throw Error('Could not forward the debug WebView');
@@ -62,16 +69,28 @@ try {
   if(!node)throw Error('Native experimental-backend confirmation is missing');
   const bounds=node.match(/bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/).slice(1).map(Number);
   command('shell','input','tap',String(Math.round((bounds[0]+bounds[2])/2)),String(Math.round((bounds[1]+bounds[3])/2)));
-  const deadline=Date.now()+timeout;
-  while(Date.now()<deadline){
-    const state=await js("({status:document.querySelector('#run-status').textContent,reply:document.querySelector('.message.assistant .message-body')?.textContent,failed:!!document.querySelector('.message.failed')})");
-    console.log(JSON.stringify(state));
-    if(state.failed)throw Error(state.reply);
-    if(state.status.startsWith('Finished')){assert.equal(state.reply,oracle.text);finished=true;break;}
-    await delay(1000);
+  const waitAnswer=async expected=>{
+    const deadline=Date.now()+timeout;
+    while(Date.now()<deadline){
+      const state=await js("({status:document.querySelector('#run-status').textContent,reply:Array.from(document.querySelectorAll('.message.assistant .message-body')).at(-1)?.textContent,failed:!!document.querySelector('.message.failed')})");
+      console.log(JSON.stringify(state));
+      if(state.failed)throw Error(state.reply);
+      if(state.status.startsWith('Finished')){assert.equal(state.reply,expected.text);return;}
+      await delay(1000);
+    }
+    throw Error('Real native-model chat did not finish');
+  };
+  await waitAnswer(oracle);
+  if(followup){
+    command('shell','input','keyevent','KEYCODE_HOME');await delay(1500);
+    command('shell','am','start','-f','0x10000000','-n','app.duga.android/app.duga.android.MainActivity');await delay(1000);
+    assert.equal(await js("document.querySelectorAll('.message.assistant').length"),1,'Session chat must survive a foreground/background cycle');
+    await js(`document.querySelector('#prompt').value=${JSON.stringify(followup.prompt)};document.querySelector('#prompt').closest('form').requestSubmit();`);
+    await waitAnswer(followup);
   }
-  assert.ok(finished,'Real native-model chat did not finish');assert.deepEqual(errors,[]);assert.deepEqual(external,[]);
-  const shot=await cdp('Page.captureScreenshot',{format:'png'});
-  const screenshot=process.env.DUGA_ANDROID_SCREENSHOT || 'native/vulkan/build/android-chat.png';fs.writeFileSync(screenshot,Buffer.from(shot.data,'base64'));
-  console.log('PASS Android native Vulkan UI answer equals original WebGPU; WebView WebGPU disabled; no WebView remote requests');
+  finished=true;assert.deepEqual(errors,[]);assert.deepEqual(external,[]);
+  const shot=spawnSync(adb,['-s',serial,'exec-out','screencap','-p'],{maxBuffer:16*1024*1024,timeout:30000});
+  assert.equal(shot.status,0);assert.equal(shot.stdout.subarray(0,8).toString('hex'),'89504e470d0a1a0a');
+  const screenshot=process.env.DUGA_ANDROID_SCREENSHOT || 'native/vulkan/build/android-chat.png';fs.writeFileSync(screenshot,shot.stdout);
+  console.log(`PASS Android native Vulkan UI ${followup?'answers, including model reload after backgrounding, equal':'answer equals'} original WebGPU; WebView WebGPU disabled; no WebView remote requests`);
 }finally{ws?.close();command('forward','--remove',`tcp:${port}`);}

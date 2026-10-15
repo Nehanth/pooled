@@ -27,6 +27,7 @@ try {
           if (args.signal.aborted) return;
           yield word;
         }
+        args.onTokens?.([101,102]);
       }};
     }
   ` }));
@@ -61,6 +62,7 @@ try {
   await page.locator('#prompt').fill('with notes'); await page.locator('#send').click();
   await page.waitForFunction(() => document.querySelector('#run-status').textContent.startsWith('Finished'));
   assert.equal(await page.evaluate(() => window.testArgs.system.includes('concise Japanese')),true);
+  assert.deepEqual(await page.evaluate(() => window.testArgs.turns.find(t=>t.role==='assistant').ids),[101,102]);
   await page.locator('#prompt').fill('slow'); await page.locator('#send').click();
   await page.waitForFunction(() => document.querySelectorAll('.message.assistant .message-body')[2].textContent.length > 0);
   await page.locator('#stop').click(); await page.locator('#stop').waitFor({state:'hidden'});

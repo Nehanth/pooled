@@ -42,17 +42,21 @@ for(const untied of (process.env.DUGA_REAL_GGUF?[false]:[false,true])){
  const chat=process.env.DUGA_CHAT_TOKENIZER;
  if(chat&&!process.env.DUGA_REAL_GGUF)throw Error('A real model is required for the chat oracle.');
  const tok=chat?makeTokenizer(JSON.parse(fs.readFileSync(chat,'utf8'))):null;
+ const previous=process.env.DUGA_CHAT_PREVIOUS?JSON.parse(fs.readFileSync(process.env.DUGA_CHAT_PREVIOUS,'utf8')):null;
+ const modelSHA256=chat?crypto.createHash('sha256').update(fixture.gguf).digest('hex'):null;
+ if(previous && (previous.modelSHA256!==modelSHA256 || typeof previous.prompt!=='string' || typeof previous.text!=='string' || !Array.isArray(previous.tokens) || previous.tokens.some(id=>!Number.isInteger(id)||id<0||id>=fixture.config.vocab_size)))throw Error('Previous chat oracle must use the same model and valid exact token IDs.');
  const prompt=process.env.DUGA_CHAT_PROMPT || 'Reply with OK only.';
- const ids=chat?buildIds(tok,{system:systemPrompt(),turns:[{role:'user',text:prompt}],thinking:false}):process.env.DUGA_REAL_GGUF?[33,72,9]:[33,72,9,201,111,62,45,99];
- if(ids.length+32>1024)throw Error('Oracle prompt exceeds the native context.');
+ const turns=previous?[{role:'user',text:previous.prompt},{role:'assistant',ids:previous.tokens},{role:'user',text:prompt}]:[{role:'user',text:prompt}];
+ const ids=chat?buildIds(tok,{system:systemPrompt(),turns,thinking:false}):process.env.DUGA_REAL_GGUF?[33,72,9]:[33,72,9,201,111,62,45,99];
+ if(ids.length+2>=1024)throw Error('Oracle prompt exceeds the native context.');
  let expected=[];for(const id of ids)expected.push(Float32Array.from(await engine.forwardToken(id)));
  if(chat){
-  const S=specials(tok),stops=new Set([S.imEnd,S.eot]),output=[];
-  for(let i=0;i<32;i++){
+  const S=specials(tok),stops=new Set([S.imEnd,S.eot]),output=[],maxNew=Math.min(384,1024-ids.length-2);
+  for(let i=0;i<maxNew;i++){
    const next=argmax(expected.at(-1));if(stops.has(next))break;
    output.push(next);ids.push(next);expected.push(Float32Array.from(await engine.forwardToken(next)));
   }
-  const result={prompt,text:tok.decode(output),tokens:output,promptTokens:ids.length-output.length,modelSHA256:crypto.createHash('sha256').update(fixture.gguf).digest('hex')};
+  const result={prompt,text:tok.decode(output),tokens:output,promptTokens:ids.length-output.length,modelSHA256,...(previous?{previous}:{})};
   fs.writeFileSync(`${dir}/chat-oracle.json`,JSON.stringify(result,null,2));console.log('Original WebGPU chat oracle:',JSON.stringify(result));
  }
  await device.queue.onSubmittedWorkDone();device.destroy();if(errs.length)throw Error(errs.join('\n'));

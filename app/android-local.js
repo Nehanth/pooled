@@ -16,12 +16,12 @@ export async function loadAndroidLocal({ signal,onStatus=()=>{},onProgress=()=>{
   let disposed=false;
   return {
     dispose(){if(disposed)return;disposed=true;stop();call('close').catch(()=>{});},
-    async *generate({system='',turns,signal,onStatus=()=>{}}){
+    async *generate({system='',turns,signal,onStatus=()=>{},onTokens=()=>{}}){
       if(disposed)throw Error('Native model has been released.');
       own.prune(turns.filter(t=>t.role==='assistant').map(t=>t.text));
-      const rendered=turns.map(t=>t.role==='assistant'&&own.get(t.text)?{role:t.role,ids:own.get(t.text)}:t);
+      const rendered=turns.map(t=>t.role==='assistant'?{role:t.role,ids:t.ids??own.get(t.text)??tok.encode(t.text)}:t);
       const ids=buildIds(tok,{system,turns:rendered,thinking:false});
-      if(ids.length+2>info.context)throw Error(`This native preview has a ${info.context}-token context. Shorten the question or start a new conversation.`);
+      if(ids.length+2>=info.context)throw Error(`This native preview has a ${info.context}-token context. Shorten the question or start a new conversation.`);
       signal?.throwIfAborted();signal?.addEventListener('abort',stop,{once:true});let text='';const output=[];
       try {
         // Serial prefill matches Dense.forwardToken. Bound each bridge request so a slow
@@ -39,6 +39,8 @@ export async function loadAndroidLocal({ signal,onStatus=()=>{},onProgress=()=>{
           if(i+1<max)result=await call('evaluate',{ids:[result.token],reset:false});
         }
         own.set(tok.decode(output),output.slice());
+        // Session history outlives the GPU model when Android pauses the app.
+        onTokens(output.slice());
       } finally {signal?.removeEventListener('abort',stop);}
     },
   };

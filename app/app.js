@@ -96,7 +96,7 @@ $('chat-form').addEventListener('submit', async e => {
   requireLocal('local');
   const ctrl = new AbortController(); run = ctrl; busy(true); $('welcome').hidden = true;
   turns.push({ role:'user', text }); addMessage('user', text); $('prompt').value = '';
-  const reply = addMessage('assistant', ''); let answer = '';
+  const reply = addMessage('assistant', ''); let answer = '', answerIds;
   event('Local task started. No remote inference route selected.');
   try {
     if (!model) {
@@ -109,10 +109,10 @@ $('chat-form').addEventListener('submit', async e => {
     }
     ctrl.signal.throwIfAborted(); $('load-progress').hidden = true; $('run-status').textContent = 'Duga is thinking on this device…';
     const selected = $('use-memories').checked ? memories.items : [];
-    for await (const delta of model.generate({ system:systemPrompt(selected), turns:turns.map(t => ({ ...t })), signal:ctrl.signal, onStatus:t => { if (!ctrl.signal.aborted) $('run-status').textContent = t; } })) {
+    for await (const delta of model.generate({ system:systemPrompt(selected), turns:turns.map(t => ({ ...t })), signal:ctrl.signal, onStatus:t => { if (!ctrl.signal.aborted) $('run-status').textContent = t; }, onTokens:ids => { answerIds=ids; } })) {
       answer += delta; reply.body.textContent = answer;
     }
-    if (answer) turns.push({ role:'assistant', text:answer }); else turns.pop();
+    if (answer) turns.push({ role:'assistant', text:answer, ...(answerIds?{ids:answerIds}:{}) }); else turns.pop();
     if (ctrl.signal.aborted) { reply.body.textContent ||= 'Stopped.'; $('run-status').textContent = 'Stopped. Nothing was sent to a remote worker.'; event('Local task stopped.'); }
     else { reply.body.textContent ||= 'No answer was produced. Try a shorter question.'; $('run-status').textContent = 'Finished on this device. Check important details.'; event('Local task completed. No external actions performed.'); }
   } catch (err) {
