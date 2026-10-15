@@ -35,7 +35,7 @@
 // fresh PROFILE takes ~96 GB of disk for the copy (check df -h first; delete test profiles after).
 // env: MODELS (~/llm/models: <MODELS>/q38flash/<the three files>), WEIGHTS_URL (fetch the files from there instead),
 //      CASES (default two-sum,bash,eos-mid), TAB_GB, TAB_RAM
-//      (the tab's ?tabram=, 3), NODE_GB (8), NODE_RAM (24), NODE_DISK (1), OFFLOAD_DISCRETE (1: the node counts as a
+//      (the tab's ?tabram=, 4: the site's default, room/flashdisk.js TAB_RAM_GB), NODE_GB (8), NODE_RAM (24), NODE_DISK (1), OFFLOAD_DISCRETE (1: the node counts as a
 //      discrete GPU on the GB10's unified memory), PROFILE (Chrome profile with the OPFS copy; default
 //      ~/.cache/pooled-flashtab-profile), CHROME_BIN (default Playwright's Chromium), HEADLESS (1), MAXNEW (cap per
 //      case, default the golden's length), PORT (8261), OUT (result JSON), SPLIT (memory), QUERY (extra page params),
@@ -56,7 +56,7 @@ const env = (k, d) => process.env[k] ?? d;
 const PORT = +env("PORT", 8261), SIG = PORT + 2, SIGNAL_HOST = env("SIGNAL_HOST", ""), SIGNAL = `${SIGNAL_HOST || "127.0.0.1"}:${SIG}`;
 const MODELS = path.resolve(env("MODELS", path.join(os.homedir(), "llm/models")));
 const FLASH_DIR = fs.existsSync(path.join(MODELS, "q38flash")) ? path.join(MODELS, "q38flash") : MODELS;
-const TAB_GB = +env("TAB_GB", MODE === "resident" ? 90 : 12), TAB_RAM = env("TAB_RAM", "3");
+const TAB_GB = +env("TAB_GB", MODE === "resident" ? 90 : 12), TAB_RAM = env("TAB_RAM", "4");
 const PROFILE = env("PROFILE", path.join(os.homedir(), ".cache", "pooled-flashtab-profile"));
 const TABDISK = env("TABDISK", "allow"), CKPT = env("CKPT", MODE === "ckpt" ? "2" : "0");
 const TRACE = env("TRACE", "") === "1";
