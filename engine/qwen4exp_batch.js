@@ -57,6 +57,13 @@ const fr = Math.fround;
 const SUBMIT_LAYERS = 12;   // layers per submit, as forwardToken
 const WIDE_COLS = 1024;     // default columns per pass with the wide kernels (fewer for long contexts: the scratch bindings)
 const LAYERED_COLS = 4096;  // tokens a layered prompt (disk-tier layers: passesLayered) takes through each layer at once
+// A layered prompt over layers parked in RAM (a room node's shared region) never waits on anything real: each layer's
+// experts go to the GPU by writeBuffer, and every await resolves at once, so a 4096-token group held the event loop
+// for its whole run (~7 s a group on an RTX 5070 at 31 layers, longer deep into a 32K prompt) and the host dropped the
+// node as silent (room/liveness.js SILENT_MS, 2026-10-14 Mac + PC run). It gives the loop a turn every YIELD_MS, as
+// the disk path's reads already do.
+const YIELD_MS = 50;
+const yieldLoop = () => new Promise((r) => (typeof setImmediate === "function" ? setImmediate(r) : setTimeout(r, 0)));
 
 export class Qwen4ExpBatch {
   static async create(engine, weights, opts = {}) { const b = new Qwen4ExpBatch(); await b._init(engine, weights, opts); return b; }
@@ -583,6 +590,7 @@ export class Qwen4ExpBatch {
     // which the next layer's first HC site folds in (build(): comb { a: moe, b: sh }, its inject partials in inj)
     const carry = [[B.R, HD], [B.moe, d], [B.sh, d], [B.inj[0], cfg.hc * cfg.hc], [B.inj[1], cfg.hc * cfg.hc]];
     const colB = carry.reduce((a, [, w]) => a + w * 4, 0);
+    let yieldAt = performance.now() + YIELD_MS;
     for (let g0 = 0; g0 < N; g0 += span) {
       const gN = Math.min(span, N - g0), pos0 = eng.pos;
       if (!this._lmBuf || this._lmBuf.size < gN * colB) { this._lmBuf?.destroy(); this._lmBuf = device.createBuffer({ size: gN * colB, usage: U.STORAGE | U.COPY_SRC | U.COPY_DST }); }
@@ -628,6 +636,7 @@ export class Qwen4ExpBatch {
           pass.end();
           move(enc, p, true);
           q.submit([enc.finish()]);
+          if (performance.now() >= yieldAt) { await yieldLoop(); yieldAt = performance.now() + YIELD_MS; }
         }
       }
       eng.pos = pos0 + gN;
