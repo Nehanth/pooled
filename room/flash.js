@@ -43,6 +43,15 @@ import { FLASH_PREFILL_FRAME, flashBatchScratch, FLASH_BATCH_BYTES_PER_COL, FLAS
 const U = globalThis.GPUBufferUsage || { MAP_READ: 1, COPY_SRC: 4, COPY_DST: 8 };
 const MAP_READ = globalThis.GPUMapMode?.READ ?? 1;
 
+// A device with disk-tier layers runs a prompt of up to DISK_STEP_COLS tokens one column at a time (core steps, through
+// its expert cache, as before #400), not in batched passes. A batched pass of 26+ columns loads each offloaded layer's
+// experts whole into the region, and on a disk layer that is a read of the whole layer from the file: on the Mac tab
+// alone (all 48 layers on disk) a 27-token question read ~77 GB and waited 28 s for its first token, where core steps
+// take ~4 s (2026-10-14, main, flash_tab_gold.mjs demo: bash 4.2 s on #397, 28.4 s after #400). Steps cost a decode
+// token's time each (~0.15 s on the Mac, ~0.5 s on the GB10 tab), a batched group of up to 4096 tokens ~20-36 s, so
+// longer prompts keep the passes.
+export const DISK_STEP_COLS = 128;
+
 export class FlashRoomEngine {
   // opts.batch: a Qwen4ExpBatch on the same engine (engine/qwen4exp_batch.js), which runs every multi-column call below
   // (prompt frames, a solo room's prompt) in passes of up to its maxCols columns. The loaders create it when this device
@@ -91,6 +100,14 @@ export class FlashRoomEngine {
   async _passes(ids, xs, basePos, want = true) {
     const b = this.batch, W = this.dims.hDim, n = ids.length;
     this.core.pos = basePos;
+    if (n <= DISK_STEP_COLS && this.core.experts?.diskSet?.size) {
+      const out = want ? new Float32Array(n * W) : null;
+      for (let c = 0; c < n; c++) {
+        const r = await this.core.step(ids[c], xs ? xs.subarray(c * W, (c + 1) * W) : null);
+        if (want) out.set(r, c * W);
+      }
+      return out;
+    }
     // disk-tier layers: layer by layer, each one read from disk once for up to b.layeredCols tokens (same bits)
     if (b.layered?.(n)) return (await b.passesLayered(Array.from(ids), { hidden: xs, wantHidden: want })).hiddens;
     const out = want ? new Float32Array(n * W) : null;
