@@ -109,7 +109,7 @@ $('chat-form').addEventListener('submit', async e => {
     }
     ctrl.signal.throwIfAborted(); $('load-progress').hidden = true; $('run-status').textContent = 'Duga is thinking on this device…';
     const selected = $('use-memories').checked ? memories.items : [];
-    for await (const delta of model.generate({ system:systemPrompt(selected), turns:turns.map(t => ({ ...t })), signal:ctrl.signal })) {
+    for await (const delta of model.generate({ system:systemPrompt(selected), turns:turns.map(t => ({ ...t })), signal:ctrl.signal, onStatus:t => { if (!ctrl.signal.aborted) $('run-status').textContent = t; } })) {
       answer += delta; reply.body.textContent = answer;
     }
     if (answer) turns.push({ role:'assistant', text:answer }); else turns.pop();

@@ -47,6 +47,20 @@ jobs:
           native/vulkan/build/duga-vk-oracle native/vulkan/build/oracle.dvk
           node native/vulkan/check-model.mjs
           node --test tests/duga/*.test.mjs
+      - name: Install the Android emulator's software Vulkan driver
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407
+        with:
+          packages: emulator
+          log-accepted-android-sdk-licenses: false
+      - name: Capture the Android software-device reference
+        env:
+          DUGA_SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          export VK_ICD_FILENAMES="$ANDROID_HOME/emulator/lib64/vulkan/vk_swiftshader_icd.json"
+          test -f "$VK_ICD_FILENAMES"
+          node native/vulkan/capture-oracle.mjs
+          native/vulkan/build/duga-vk-oracle native/vulkan/build/oracle.dvk
+          node native/vulkan/check-model.mjs
       - name: Upload validated native shader inputs
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -95,6 +109,22 @@ jobs:
           printf 'DUGA_KEYSTORE_PATH=%s\n' "$RUNNER_TEMP/duga-release.jks" >> "$GITHUB_ENV"
       - name: Test and lint Android port
         run: android/gradlew -p android testDebugUnitTest lintDebug --no-daemon
+      - name: Enable KVM access for the Android test device
+        run: |
+          test -e /dev/kvm
+          sudo chmod a+rw /dev/kvm
+      - name: Verify Android Vulkan logits, JNI and bundled UI
+        uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          ram-size: 2048M
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none -camera-front none
+          script: |
+            npm ci --prefix native/vulkan/oracle --no-audit --no-fund
+            VK_ICD_FILENAMES="$ANDROID_HOME/emulator/lib64/vulkan/vk_swiftshader_icd.json" DUGA_WEBGPU_MODULE=native/vulkan/oracle/node_modules/webgpu/index.js node scripts/android-native-check.mjs
+            android/gradlew -p android connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.requireExactVulkan=true --no-daemon
       - name: Build preview APK and AAB
         if: ${{ !startsWith(github.ref, 'refs/tags/android-v') }}
         run: android/gradlew -p android assembleDebug bundleDebug --no-daemon

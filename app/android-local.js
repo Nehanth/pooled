@@ -16,7 +16,7 @@ export async function loadAndroidLocal({ signal,onStatus=()=>{},onProgress=()=>{
   let disposed=false;
   return {
     dispose(){if(disposed)return;disposed=true;stop();call('close').catch(()=>{});},
-    async *generate({system='',turns,signal}){
+    async *generate({system='',turns,signal,onStatus=()=>{}}){
       if(disposed)throw Error('Native model has been released.');
       own.prune(turns.filter(t=>t.role==='assistant').map(t=>t.text));
       const rendered=turns.map(t=>t.role==='assistant'&&own.get(t.text)?{role:t.role,ids:own.get(t.text)}:t);
@@ -24,7 +24,15 @@ export async function loadAndroidLocal({ signal,onStatus=()=>{},onProgress=()=>{
       if(ids.length+2>info.context)throw Error(`This native preview has a ${info.context}-token context. Shorten the question or start a new conversation.`);
       signal?.throwIfAborted();signal?.addEventListener('abort',stop,{once:true});let text='';const output=[];
       try {
-        let result=await call('evaluate',{ids,reset:true});
+        // Serial prefill matches Dense.forwardToken. Bound each bridge request so a slow
+        // device can report progress and cancel without timing out a whole prompt batch.
+        let result;
+        for(let i=0;i<ids.length;i++){
+          signal?.throwIfAborted();
+          onStatus(`Reading the question on this device · ${i+1}/${ids.length} tokens`);
+          result=await call('evaluate',{ids:[ids[i]],reset:i===0});
+        }
+        onStatus('Writing the answer on this device…');
         const max=Math.min(384,info.context-ids.length-2);
         for(let i=0;i<max&&!signal?.aborted&&!stops.has(result.token);i++){
           output.push(result.token);const now=tok.decode(output);if(now.length>text.length&&!now.endsWith('\uFFFD')){yield now.slice(text.length);text=now;}

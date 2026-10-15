@@ -41,6 +41,8 @@ android {
   }
   buildFeatures { buildConfig true }
   sourceSets.main.assets.srcDirs = [layout.buildDirectory.dir('generated/web-assets')]
+  // Oracle models belong to the test APK only, never the distributed app.
+  sourceSets.androidTest.assets.srcDirs = [new File(rootProject.projectDir.parentFile, 'native/vulkan/build/fixtures')]
   testOptions.unitTests.returnDefaultValues = true
   lint {
     abortOnError true
