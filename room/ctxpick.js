@@ -84,14 +84,15 @@ export function ctxOptions(model, { metas, pledges, costs = roomCosts(model), ma
 //             2051 cells a token)
 //   disk      a device reads experts from its disk (a tab's disk tier): its layered passes (engine/qwen4exp_batch.js
 //             passesLayered) read each disk layer once per FLASH_PREFILL_DISK.group tokens, so a group costs
-//             groupS of reads and every token perTokS more: 1887 tokens in 51 s, 7663 in 134 s (flash_tab_gold.mjs
-//             tab, a 22 GB tab on the GB10; a Mac's own disk may differ)
-//             In a room the other devices batch the tab's wide frames too (a room node with a small cache borrows the
-//             region from it, #405), and the tab holds fewer layers: tab + room node, 1887 tokens in 33 s, 7663 in 92 s.
-//             The solo numbers stand for both (a little slow for a room)
+//             groupS of reads and every token perTokS more. Measured on the demo's Mac (a 20 GB tab alone, its OPFS
+//             copy; flash_tab_gold.mjs demo, 2026-10-14, a 64K room): 7663 tokens in 45.7 s, 15718 in 99.2 s, about
+//             160 tokens a second at any length (its disk reads keep up: no group cost shows). The Mac with the PC
+//             joined (pooled join, the PC batching its 31 layers): 1887 in 15.7 s, 7663 in 35.9 s, 15718 in 55-63 s,
+//             31958 in 82 s. The Mac's solo rate stands for both (slow for a room). The GB10's 22 GB tab is ~3x
+//             slower (1887 in 51 s, 7663 in 134 s: its disk reads cost ~36 s a group)
 // -> seconds, or null for a model without measurements
 export const FLASH_PREFILL_TPS = { batch: { 8192: 189, 32768: 200, 65536: 200, 131072: 186 }, perToken: { 8192: 15.8, 131072: 15.8 } };
-export const FLASH_PREFILL_DISK = { group: 4096, groupS: 35.7, perTokS: 1 / 123 };
+export const FLASH_PREFILL_DISK = { group: 4096, groupS: 0, perTokS: 1 / 160 };
 export function prefillSeconds(model, tokens, { mode = "batch" } = {}) {
   if (MODELS[model]?.kind !== "qwen4exp" || !(tokens > 0)) return null;
   if (mode === "disk") { const d = FLASH_PREFILL_DISK; return Math.ceil(tokens / d.group) * d.groupS + tokens * d.perTokS; }

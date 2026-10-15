@@ -87,6 +87,30 @@ golden or any of its reruns, and a needle case needs the passphrase):
   the demo room (a Mac tab lending 22 GB with the disk tier, a PC lending 12 GB) at 128K with the tab's disk-tier RAM at
   4 GB (`room/flashdisk.js` `TAB_RAM_GB`, was 3). It is left out until a run passes the rule.
 
+The demo room on real hardware (2026-10-14, `flash_tab_gold.mjs demo`): the Mac tab (Chrome, lends 20 GB, the disk
+tier with 4 GB of RAM, `maxStorageBufferBindingSize` 4 GiB) alone, then the PC joins over WiFi (`pooled join --gb 10
+--ram 43 --disk`, RTX 5070, its 31 layers' experts in RAM). The room opens at 65,536 (f16 K / V); the PC loads it
+(layers 17-47, 40 cached experts a layer).
+
+| case | devices | verdict | prompt read in | decode |
+|---|---|---|---|---|
+| two-sum | Mac alone | MATCH | 3.0 s | 5.1 tok/s |
+| ctx8k | Mac alone | TIE at 6 | 45.7 s (168 tok/s) | 3.5 |
+| ctx16k | Mac alone | TIE at 3 | 99.2 s (158 tok/s) | 5.5 |
+| ctx2k | Mac + PC | TIE at 6 | 15.7 s | 6.3 |
+| ctx8k | Mac + PC | TIE at 6 | 35.9 s (213 tok/s) | 6.6 |
+| ctx16k | Mac + PC | TIE at 3 | 55-63 s | 6.1-7.2 |
+| ctx32k | Mac + PC | TIE at 0 (llama.cpp's rerun 1) | 82 s (390 tok/s) | 6.1 |
+
+- A two-turn chat past 16K (`TURNS=ctx16k`, `?ckpt=2`): turn 2 (15,735 tokens) restored turn 1's checkpoint and read
+  one token, in 0.2 s; both turns' ids pass.
+- Changing the context in Room settings while the room runs (64K to 8K, `CTX_SWITCH`): online again on both devices in
+  50 s; the next answers MATCH, at 9.7-10.2 tok/s.
+- Decode is slower at a long context: Mac alone ~5 tok/s at 64K (7.8 at 2048), Mac + PC 6-7 (9.4-10 at 2048 or 8K). The
+  context's K / V and its two checkpoint slots come out of each device's GPU expert cache (the Mac alone: 108 cached
+  experts a layer at 2048, 71 at 64K), so more expert reads miss.
+- The picker's "a full paste" estimate for a disk room uses the Mac's solo rate (`room/ctxpick.js` `FLASH_PREFILL_DISK`).
+
 Memory per device follows `flashLayerCost` (#380): weights, the range's state at the context, two checkpoint slots of
 it, and the QSA scores once. A room node keeps at most those two slots past 2048 (one answer, one pinned prefix), so a
 long chat never outgrows what the deal reserved. A tab keeps `?ckpt=2` by default.

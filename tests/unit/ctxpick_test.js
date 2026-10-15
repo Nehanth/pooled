@@ -106,7 +106,8 @@ Deno.test("ctxpick: prefill estimates in words", () => {
   // a disk room's layered passes: slower than every device batching, faster than stepping a column at a time
   ok(prefillSeconds(F, 8192, { mode: "perToken" }) > prefillSeconds(F, 8192, { mode: "disk" }) && prefillSeconds(F, 8192, { mode: "disk" }) > prefillSeconds(F, 8192));
   // the tab's measurements: 1887 tokens in 51 s, 7663 in 134 s
-  ok(Math.abs(prefillSeconds(F, 1887, { mode: "disk" }) - 51) < 2 && Math.abs(prefillSeconds(F, 7663, { mode: "disk" }) - 134) < 2);
+  // (the Mac tab alone: 7663 tokens in 45.7 s, 15718 in 99.2 s)
+  ok(Math.abs(prefillSeconds(F, 7663, { mode: "disk" }) - 45.7) < 5 && Math.abs(prefillSeconds(F, 15718, { mode: "disk" }) - 99.2) < 5);
   eq([prefillMode({ fits: true }), prefillMode({ offload: true }), prefillMode({ offload: true, disk: true })], ["batch", "perToken", "disk"]);
   eq(prefillSeconds("qwen3.8-27b", 8192), null);
   eq([durationWords(40), durationWords(600), durationWords(7200)], ["about 40 s", "about 10 min", "about 2 h"]);
