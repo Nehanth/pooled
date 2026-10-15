@@ -30,7 +30,7 @@ final class UrlPolicy {
     if ("/room".equals(requestPath) || "/p2p.html".equals(requestPath)) return "p2p.html";
     if (requestPath.startsWith("/r/") && CODE.matcher(requestPath.substring(3)).matches()) return "p2p.html";
     for (String dir:new String[]{"app/","engine/","room/","harness/","site/"}) if (requestPath.startsWith("/"+dir)) return requestPath.substring(1);
-    if ("/index.html".equals(requestPath) || "/favicon.svg".equals(requestPath) || "/site.webmanifest".equals(requestPath) || "/android-host.js".equals(requestPath) || "/LICENSE".equals(requestPath)) return requestPath.substring(1);
+    if ("/index.html".equals(requestPath) || "/room.js".equals(requestPath) || "/favicon.svg".equals(requestPath) || "/site.webmanifest".equals(requestPath) || "/android-host.js".equals(requestPath) || "/LICENSE".equals(requestPath)) return requestPath.substring(1);
     return null;
   }
   static boolean external(String value) { try {URI u=URI.create(value); return "https".equals(u.getScheme())&&u.getHost()!=null&&u.getRawUserInfo()==null&&!isApp(value);}catch(RuntimeException e){return false;} }

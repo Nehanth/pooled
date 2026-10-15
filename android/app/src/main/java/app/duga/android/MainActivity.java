@@ -66,7 +66,16 @@ public final class MainActivity extends Activity {
       @Override public void onPermissionRequest(PermissionRequest request){request.deny();}
       @Override public boolean onCreateWindow(WebView view,boolean dialog,boolean gesture,Message result){
         if(!gesture)return false;
-        WebView popup=new WebView(MainActivity.this);popup.setWebViewClient(new WebViewClient(){@Override public boolean shouldOverrideUrlLoading(WebView v,WebResourceRequest r){String u=r.getUrl().toString();if(UrlPolicy.isApp(u)&&r.getUrl().getPath().startsWith("/docs"))u="https://duga.app"+r.getUrl().getPath();openExternal(u);v.destroy();return true;}});
+        WebView popup=new WebView(MainActivity.this);popup.setWebViewClient(new WebViewClient(){
+          @Override public boolean shouldOverrideUrlLoading(WebView v,WebResourceRequest r){
+            String u=r.getUrl().toString(),path=r.getUrl().getPath();
+            if(UrlPolicy.isApp(u)){
+              if(path!=null&&path.startsWith("/docs"))openExternal("https://duga.app"+path);
+              else if(UrlPolicy.asset(path)!=null){cancelNative();web.loadUrl(u);}
+            }else openExternal(u);
+            v.destroy();return true;
+          }
+        });
         ((WebView.WebViewTransport)result.obj).setWebView(popup);result.sendToTarget();return true;
       }
     });
@@ -91,7 +100,7 @@ public final class MainActivity extends Activity {
       case "copy":((ClipboardManager)getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("Duga",r.text("text",65536)));respond(reply,r.id,new JSONObject(),null);return;
       case "share":String text=r.text("text",65536),url=r.text("url",4096);if(!url.isEmpty()&&!UrlPolicy.isApp(url)&&!UrlPolicy.external(url))throw new JSONException("Unsupported share URL");if(UrlPolicy.isApp(url))url="https://duga.app"+Uri.parse(url).getEncodedPath()+(Uri.parse(url).getEncodedFragment()==null?"":"#"+Uri.parse(url).getEncodedFragment());Intent share=new Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT,text+(url.isEmpty()?"":"\n"+url));startActivity(Intent.createChooser(share,getString(R.string.share_prompt)));respond(reply,r.id,new JSONObject(),null);return;
       case "export":if(exportReply!=null){respond(reply,r.id,null,"Finish the current export first.");return;}String name=r.filename(),type=r.mime();exportData=r.exportBytes();exportId=r.id;exportReply=reply;startActivityForResult(new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType(type).putExtra(Intent.EXTRA_TITLE,name),SAVE_DOCUMENT);return;
-      case "load":if(!approved){new AlertDialog.Builder(this).setTitle("Enable experimental native Vulkan?").setMessage("Original shaders and native shaders must match exactly on this GPU before loading. This kernel check does not guarantee every phone or conversation; the backend remains experimental. First use downloads about 640 MB of Qwen3 weights to app-private storage. No hosted inference fallback.").setPositiveButton("Validate & download",(d,w)->{approved=true;load(r,reply);}).setNegativeButton("Cancel",(d,w)->respond(reply,r.id,null,"Native Vulkan preparation cancelled.")).show();}else load(r,reply);return;
+      case "load":if(!approved){new AlertDialog.Builder(this).setTitle("Enable experimental native Vulkan?").setMessage("Original shaders and native shaders must match exactly on this GPU before loading. This kernel check does not guarantee every phone or conversation; the backend remains experimental. First use downloads about 640 MB of Qwen3 weights to app-private storage. No hosted inference fallback.").setPositiveButton("Validate & download",(d,w)->{approved=true;load(r,reply);}).setNegativeButton("Cancel",(d,w)->respond(reply,r.id,null,"Native Vulkan preparation cancelled.")).setOnCancelListener(d->respond(reply,r.id,null,"Native Vulkan preparation cancelled.")).show();}else load(r,reply);return;
       case "evaluate":int[] ids=r.tokens();boolean reset=r.json.optBoolean("reset",false);worker.execute(()->{try{long h; synchronized(modelLock){h=modelHandle;}if(h==0)throw new IllegalStateException("Native model is not loaded");int token=NativeVulkan.evaluate(h,ids,reset);respond(reply,r.id,new JSONObject().put("token",token),null);}catch(Exception e){respond(reply,r.id,null,e.getMessage());}});return;
       default:throw new JSONException("Unsupported request");
     }

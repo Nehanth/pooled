@@ -12,6 +12,7 @@ public class PolicyTest {
   }
   @Test public void assetRoutingRejectsPrivateFilesAndTraversal() {
     assertEquals("index.html",UrlPolicy.asset("/"));assertEquals("p2p.html",UrlPolicy.asset("/r/ABC234"));assertEquals("p2p.html",UrlPolicy.asset("/room"));
+    assertEquals("room.js",UrlPolicy.asset("/room.js"));
     for(String path:new String[]{"/../local.properties","/app/../../models/secret","/app/%2e%2e/private","/android/local.properties","/native/vulkan/jni.cpp","/models/qwen3.gguf","/app//test.js"})assertNull(path,UrlPolicy.asset(path));
     assertFalse(UrlPolicy.isApp("https://appassets.androidplatform.net.evil/"));assertFalse(UrlPolicy.isApp("http://appassets.androidplatform.net/"));
     assertFalse(UrlPolicy.external("intent://run"));assertFalse(UrlPolicy.external("file:///secret"));assertTrue(UrlPolicy.external("https://duga.app/docs"));

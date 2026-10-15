@@ -3,7 +3,12 @@ import androidx.test.core.app.ActivityScenario;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
 import android.webkit.WebView;
+import android.os.SystemClock;
+import android.view.KeyEvent;
+import android.view.MotionEvent;
+import android.view.View;
 import android.view.ViewGroup;
+import android.view.inspector.WindowInspector;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import java.util.concurrent.*;
@@ -22,6 +27,54 @@ public class PortSmokeTest {
     long end=System.currentTimeMillis()+30000;
     while(System.currentTimeMillis()<end){if("true".equals(js(scenario,"!!window.DugaNativeRuntime && !!document.querySelector('#prompt') && document.readyState === 'complete'")))return;Thread.sleep(100);}
     fail("Bundled Duga UI did not become ready");
+  }
+  private void awaitJs(ActivityScenario<MainActivity> scenario,String script)throws Exception {
+    long end=System.currentTimeMillis()+10000;
+    while(System.currentTimeMillis()<end){if("true".equals(js(scenario,script)))return;Thread.sleep(100);}
+    fail("WebView condition timed out: "+script);
+  }
+  private void tapWeb(ActivityScenario<MainActivity> scenario,String selector)throws Exception {
+    org.json.JSONArray point=new org.json.JSONArray(js(scenario,"(()=>{const e=document.querySelector("+org.json.JSONObject.quote(selector)+");e.scrollIntoView({block:'center'});const r=e.getBoundingClientRect();return [r.x+r.width/2,r.y+r.height/2,innerWidth];})()"));
+    float x=(float)point.getDouble(0),y=(float)point.getDouble(1),width=(float)point.getDouble(2);
+    scenario.onActivity(a->{
+      ViewGroup content=a.findViewById(android.R.id.content);WebView web=(WebView)((ViewGroup)content.getChildAt(0)).getChildAt(0);
+      float scale=web.getWidth()/width;long now=SystemClock.uptimeMillis();
+      MotionEvent down=MotionEvent.obtain(now,now,MotionEvent.ACTION_DOWN,x*scale,y*scale,0),up=MotionEvent.obtain(now,now+50,MotionEvent.ACTION_UP,x*scale,y*scale,0);
+      web.dispatchTouchEvent(down);web.dispatchTouchEvent(up);down.recycle();up.recycle();
+    });
+  }
+  private View confirmationButton() {
+    for(View root:WindowInspector.getGlobalWindowViews()){
+      View button=root.findViewById(android.R.id.button2);if(button!=null&&button.isShown())return button;
+    }
+    return null;
+  }
+  @Test public void cancellingNativeConfirmationSettlesLoadAndAllowsRetry()throws Exception {
+    try(ActivityScenario<MainActivity> scenario=ActivityScenario.launch(MainActivity.class)){
+      ready(scenario);
+      for(String dismissal:new String[]{"back","outside","button"}){
+        js(scenario,"window.loadResult='pending';window.DugaNativeRuntime.call('load').then(()=>window.loadResult='loaded',e=>window.loadResult=e.message);");
+        long end=System.currentTimeMillis()+10000;AtomicReference<View> button=new AtomicReference<>();
+        while(System.currentTimeMillis()<end){scenario.onActivity(a->button.set(confirmationButton()));if(button.get()!=null)break;Thread.sleep(100);}
+        assertNotNull("Native confirmation did not appear",button.get());
+        if("back".equals(dismissal))InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(KeyEvent.KEYCODE_BACK);
+        else if("outside".equals(dismissal))scenario.onActivity(a->{
+          long now=SystemClock.uptimeMillis();MotionEvent outside=MotionEvent.obtain(now,now,MotionEvent.ACTION_OUTSIDE,-1,-1,0);
+          button.get().getRootView().dispatchTouchEvent(outside);outside.recycle();
+        });
+        else scenario.onActivity(a->button.get().performClick());
+        awaitJs(scenario,"window.loadResult === 'Native Vulkan preparation cancelled.'");
+      }
+    }
+  }
+  @Test public void codePopupOpensBundledRoomAndInitializesItsModule()throws Exception {
+    try(ActivityScenario<MainActivity> scenario=ActivityScenario.launch(MainActivity.class)){
+      ready(scenario);
+      js(scenario,"document.querySelector('[data-view=code]').click();");
+      tapWeb(scenario,".workspace-intro a[target=_blank]");
+      awaitJs(scenario,"location.pathname === '/room' && !!document.querySelector('#join-gpu') && !document.querySelector('#join-gpu').hidden");
+      assertEquals("true",js(scenario,"!!window.DugaNativeRuntime && !navigator.gpu"));
+    }
   }
   @Test public void bundledAssistantStartsWithoutWebsiteAndUsesScopedNativeBridge()throws Exception {
     try(ActivityScenario<MainActivity> scenario=ActivityScenario.launch(MainActivity.class)){
