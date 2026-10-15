@@ -98,8 +98,29 @@ The pair, against the mainline goldens (2026-10-15), and against b10840's (2026-
   our gap 0.18): not f16's. So 131072 stays unproven. Step 21 of `ctx128k` moves with how mainline itself computes it:
   teacher-forced (the prompt and the first ids through `llama_decode` in 2048-token batches) 4162 leads 16350 by only
   0.22-0.31 nats, where the server, decoding the ids one at a time, has 0.92 (deterministic, 3 of 3). The room,
-  decoding, takes 16350 by 0.28. The rule judges the server's greedy run, so the case fails as it stands; the next
-  check is the room teacher-forced on the same ids, to see whether our decode and batched paths part there too.
+  decoding, takes 16350 by 0.28. The rule judges the server's greedy run, so the case fails as it stands.
+- The room teacher-forced on the same ids (2026-10-15, the f16 pair; the room's ids equal the golden's through step 20,
+  so it is the same position). Log-probs at step 21, and 4162's lead over 16350:
+
+  | path | 4162 | 16350 | lead |
+  |---|---|---|---|
+  | llama.cpp server, one token at a time (the golden, 3 of 3) | -0.575 | -1.496 | +0.921 |
+  | llama.cpp `llama_decode`, prompt + 21 ids in 2048-token batches (2 runs) | -1.087 / -1.154 | -1.398 / -1.376 | +0.310 / +0.222 |
+  | room, prompt batched, 21 ids decoded one at a time (`flash_gold`) | -1.166 | -0.891 | -0.275 |
+  | room, prompt + 21 ids in one batched prefill | -1.166 | -0.891 | -0.275 |
+  | room, prompt batched, then the 20 ids as one 20-column pass | -1.166 | -0.891 | -0.275 |
+  | room, prompt + 20 ids batched, then one decode | -1.166 | -0.891 | -0.275 |
+
+  The room's paths agree to 1e-4 nats. llama.cpp's two disagree with each other by 0.51-0.58 on 4162 and 0.61-0.70 on
+  the lead. The room is 0.01-0.08 from llama.cpp's batched path on 4162 and 0.49-0.51 on 16350 (lead 0.50-0.58 off). It is
+  0.59 / 0.61 from the server's (lead 1.20 off), which is llama.cpp's own path gap plus that. Over the whole answer
+  (top-5 log-probs, the largest difference among the tokens both list): the room against llama.cpp's batched path on
+  the room's own 64 ids has a median of 0.47 (max 2.57), with the same top-1 at 62 of 64 steps (the other two are
+  near ties: step 21, and step 45 with a gap of 0.04 in both). llama.cpp's server against its own batched path, on the
+  golden's ids at steps 0-20, has a median of 0.92 (max 4.26). So the miss is path sensitivity at a near tie, of the
+  size llama.cpp shows against itself, not a defect in the room's decode or prefill attention at 128K. The rule is
+  unchanged, so `ctx128k` still fails and 131072 is not proven. Per-token prefill (`POOLED_FLASH_BATCH=0`, about 2.5
+  hours at 128K) was not run: batched, 20-column and decode passes already give the same numbers here.
 - `flash_gold.mjs` `UNPROVEN_CTX=1` (this harness only) lifts the cap to `CTX` so a room opens at a length before it is
   proven.
 - 8K with batching off (`POOLED_FLASH_BATCH=0`, one column at a time): 15.8-18.3 tok/s, ctx8k in 485 s. Batched and
