@@ -18,12 +18,13 @@ jobs:
     timeout-minutes: 25
     env:
       DUGA_WEBGPU_MODULE: native/vulkan/oracle/node_modules/webgpu/index.js
+      DUGA_SOURCE_COMMIT: ${{ github.sha }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with: { node-version: 22 }
       - name: Install native build and software Vulkan driver
-        run: sudo apt-get update && sudo apt-get install -y g++ libvulkan-dev mesa-vulkan-drivers
+        run: sudo apt-get update && sudo apt-get install -y g++ libvulkan-dev mesa-vulkan-drivers spirv-tools
       - name: Select the installed software Vulkan ICD
         run: |
           mapfile -t icds < <(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name '*lvp*.json' -print)
@@ -37,6 +38,7 @@ jobs:
       - name: Compile original shader sources and Vulkan runners
         run: |
           node native/vulkan/shaders.mjs
+          node native/vulkan/export-reference.mjs
           g++ -std=c++17 -O2 -ffp-contract=off -Inative/vulkan/build/shaders native/vulkan/vulkan.cpp native/vulkan/oracle.cpp -lvulkan -o native/vulkan/build/duga-vk-oracle
           g++ -std=c++17 -O2 -ffp-contract=off -Inative/vulkan/build/shaders native/vulkan/vulkan.cpp native/vulkan/gguf.cpp native/vulkan/dense.cpp native/vulkan/model-run.cpp -lvulkan -o native/vulkan/build/duga-vk-model
       - name: Capture WebGPU oracle and require exact Vulkan parity
@@ -45,6 +47,8 @@ jobs:
         run: |
           node native/vulkan/capture-oracle.mjs
           native/vulkan/build/duga-vk-oracle native/vulkan/build/oracle.dvk
+          native/vulkan/build/duga-vk-oracle native/vulkan/build/oracle.dvk --reference
+          native/vulkan/build/duga-vk-oracle native/vulkan/build/oracle.dvk --on-device
           node native/vulkan/check-model.mjs
           node --test tests/duga/*.test.mjs
       - name: Install the Android emulator's software Vulkan driver
@@ -60,6 +64,8 @@ jobs:
           test -f "$VK_ICD_FILENAMES"
           node native/vulkan/capture-oracle.mjs
           native/vulkan/build/duga-vk-oracle native/vulkan/build/oracle.dvk
+          native/vulkan/build/duga-vk-oracle native/vulkan/build/oracle.dvk --reference
+          native/vulkan/build/duga-vk-oracle native/vulkan/build/oracle.dvk --on-device
           node native/vulkan/check-model.mjs
       - name: Upload validated native shader inputs
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

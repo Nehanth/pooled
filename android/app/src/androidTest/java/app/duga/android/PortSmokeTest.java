@@ -71,4 +71,11 @@ public class PortSmokeTest {
       }finally{NativeVulkan.close(handle);model.delete();}
     }
   }
+  @Test public void oracleRejectsAnEmptyCaseSetInsteadOfPassingVacuously()throws Exception {
+    android.content.Context c=InstrumentationRegistry.getInstrumentation().getTargetContext();
+    java.io.File trace=new java.io.File(c.getCacheDir(),"empty-oracle.dvk");
+    try(java.io.OutputStream out=new java.io.FileOutputStream(trace)){out.write(new byte[]{0x44,0x56,0x4b,0x31,0,0,0,0});}
+    assertEquals("Every kernel must actually be checked",1,NativeVulkan.oracle(trace.getAbsolutePath()));
+    trace.delete();
+  }
 }

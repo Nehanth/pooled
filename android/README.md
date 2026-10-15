@@ -2,7 +2,7 @@
 
 An installable Android port with the Duga UI bundled in the APK and **direct native Vulkan inference** through JNI. The UI is a WebView; Local computation does not use WebView WebGPU. Android 10/API 29 or later, arm64-v8a and x86_64. This initial backend supports Qwen3 Dense Q8_0/F32 GGUF only; no MoE, DeltaNet, native distributed peers or speculative decoding.
 
-The first Local task asks to enable the experimental backend and runs an exact kernel-oracle gate. A mismatch or unavailable driver leaves Local unavailable; there is no tolerance-based acceptance or hosted fallback. First successful setup downloads about 640 MB of pinned, SHA-256-verified Qwen3 0.6B weights to app-private storage. Context is 1,024 tokens and responses are capped at 384 tokens. Device memory, speed and real-phone quality are not guaranteed. Trusted rooms remain a separate compute choice. APK rooms are chat clients of another trusted device; WebGPU contribution is disabled in the APK until native distributed Vulkan workers are implemented.
+The first Local task asks to enable the experimental backend and runs an exact kernel-oracle gate: the production Naga shaders and independently compiled original Dawn/Tint shaders execute the same synthetic inputs on this device’s GPU. Dawn and WebGPU are build/test tools, never APK runtime dependencies. A mismatch or unavailable driver leaves Local unavailable; there is no tolerance-based acceptance or hosted fallback. First successful setup downloads about 640 MB of pinned, SHA-256-verified Qwen3 0.6B weights to app-private storage. Context is 1,024 tokens and responses are capped at 384 tokens. Device memory, speed and real-phone quality are not guaranteed. Trusted rooms remain a separate compute choice. APK rooms are chat clients of another trusted device; WebGPU contribution is disabled in the APK until native distributed Vulkan workers are implemented.
 
 ## Build locally
 
@@ -11,12 +11,14 @@ Install JDK 17, Node 22, Rust, Android SDK 36, build-tools 35.0.0, NDK 27.3.1375
 ```sh
 cargo install naga-cli --version 30.0.1 --locked
 npm ci --prefix native/vulkan/oracle
+export DUGA_WEBGPU_MODULE=native/vulkan/oracle/node_modules/webgpu/index.js
 node native/vulkan/shaders.mjs
-DUGA_WEBGPU_MODULE=native/vulkan/oracle/node_modules/webgpu/index.js node native/vulkan/capture-oracle.mjs
+node native/vulkan/export-reference.mjs  # requires spirv-as and spirv-val
+node native/vulkan/capture-oracle.mjs
 android/gradlew -p android testDebugUnitTest lintDebug assembleDebug bundleDebug
 ```
 
-Capturing the oracle requires a working WebGPU/Vulkan adapter. CI checks Mesa Lavapipe and the Android emulator's SwiftShader separately, then packages the SwiftShader reference for Android. A reference captured on a different GPU can legitimately fail: floating-point results are not universally bit-identical across drivers. The gate still rejects every mismatch. `syncWebAssets` automatically copies the allowlisted runtime assets, native Android shim and captured oracle; it never copies model weights or repository metadata.
+Capturing/calibrating the oracle requires a working WebGPU/Vulkan adapter and SPIR-V Tools (`spirv-as`, `spirv-val`; also available in the pinned NDK shader-tools directory through `SPIRV_AS`/`SPIRV_VAL`). CI calibrates both compiled programs against actual WebGPU output on Lavapipe and SwiftShader. Captured floating-point bytes are device-specific. The APK uses the captured synthetic inputs but recomputes its expected output with the original Tint program on the current GPU; every bit mismatch still fails. `syncWebAssets` automatically copies the allowlisted runtime assets, native Android shim and captured oracle; it never copies model weights or repository metadata.
 
 Outputs:
 
@@ -28,19 +30,20 @@ For a SwiftShader emulator, capture its matching software reference and check th
 ```sh
 export VK_ICD_FILENAMES="$ANDROID_HOME/emulator/lib64/vulkan/vk_swiftshader_icd.json"
 export DUGA_WEBGPU_MODULE=native/vulkan/oracle/node_modules/webgpu/index.js
+node native/vulkan/export-reference.mjs
 node native/vulkan/capture-oracle.mjs
 DUGA_ANDROID_SERIAL=emulator-5554 node scripts/android-native-check.mjs
 android/gradlew -p android connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.requireExactVulkan=true
 ```
 
-The script builds Android command-line runners with the pinned NDK, replays all kernel traces on the device and compares every tiny-model logit with original WebGPU execution. It produces test-only GGUF/greedy fixtures for instrumented JNI tests. Those fixtures are included only in the test APK. Instrumentation covers bundled UI, explicit notes, scoped bridge presence, tied/untied JNI decoding, cancellation/reset and missing-model rejection. CI requires oracle status 0; unknown real devices may reject the reference and leave Local unavailable. Android 15/x86_64 SwiftShader passed all twelve kernels, both tiny models and a separate real Qwen3 0.6B three-position comparison (455,808 exact logits). This does not establish physical-phone performance or universal mobile GPU equivalence.
+The script builds Android command-line runners with the pinned NDK, replays all kernel traces on the device and compares every tiny-model logit with original WebGPU execution. It produces test-only GGUF/greedy fixtures for instrumented JNI tests. Those fixtures are included only in the test APK. Instrumentation covers bundled UI, explicit notes, scoped bridge presence, tied/untied JNI decoding, cancellation/reset and missing-model rejection. CI requires oracle status 0; unknown real devices may fail shader equivalence/capability checks and leave Local unavailable. A passed kernel check is not a universal model-quality or physical-phone compatibility guarantee. Android 15/x86_64 SwiftShader passed all twelve kernels, both tiny models and a separate real Qwen3 0.6B three-position comparison (455,808 exact logits). This does not establish physical-phone performance or universal mobile GPU equivalence.
 
 ## GitHub Actions and tag delivery
 
 [Android workflow](../.github/workflows/android.yml) runs on pull requests, `main`, `feat/duga-android`, manual dispatch, and `android-v*` tags. It:
 
 1. Compiles the original WGSL to SPIR-V using pinned Naga 30.0.1.
-2. Executes the original WGSL on Dawn WebGPU, then requires bit-exact Vulkan parity for twelve kernels and all logits of tied/untied tiny Dense models, separately on Lavapipe and SwiftShader.
+2. Executes the original WGSL on Dawn WebGPU, then requires bit-exact Vulkan parity for twelve kernels and all logits of tied/untied tiny Dense models, separately on Lavapipe and SwiftShader. Exported Tint programs are calibrated against those same captured bytes before they may be used as the on-device oracle.
 3. Runs Node packaging/version tests, Java policy tests and Android lint. Boots an Android 15/x86_64 SwiftShader emulator and requires exact device kernel/logit parity plus instrumented JNI/UI tests before delivery.
 4. Builds APK and AAB for arm64/x86_64, checks ZIP alignment for 16 KB pages, and uploads them with SHA256SUMS as the `duga-android` Actions artifact.
 5. For a distribution tag, signs release APK/AAB, verifies their signatures, then publishes the files to GitHub Releases. Tags with a prerelease suffix create prereleases. Browser/Vercel deployment is unchanged.
@@ -73,3 +76,13 @@ Tag format is validated before signing. `versionName` comes from the tag, and `v
 - Backgrounding cancels native compute and disconnects the room workspace. This is a foreground app, not an always-on worker. Chat is ephemeral; room work may need reopening after an interruption. Disconnecting is not credential revocation.
 
 See [the design and validation record](../docs/design/duga-android.md) for scope and limitations.
+
+## Manual real-model UI oracle
+
+For a dedicated emulator with a debug APK installed, `check-model.mjs` can also generate the full chat oracle. Set `DUGA_REAL_GGUF`, `DUGA_REAL_CONFIG`, `DUGA_CHAT_TOKENIZER` and `DUGA_WEBGPU_MODULE` to verified local files; optionally set `DUGA_NATIVE_RUNNER`, `DUGA_ANDROID_SERIAL` and `ADB` to replay every logit through the Android executable. `node native/vulkan/check-model.mjs` writes `native/vulkan/build/chat-oracle.json` and fails on any logit bit difference. Then run:
+
+```sh
+DUGA_ANDROID_SERIAL=emulator-5554 node tests/e2e/android-native-chat.mjs
+```
+
+This restarts Duga on the dedicated emulator, approves its native-backend confirmation, disables WebView WebGPU, submits the oracle’s prompt through the real UI and requires the exact original answer. The normal pinned-model preparation/download still runs; no model or inference call is mocked. The screenshot is saved under `native/vulkan/build/`. Use hardware GPU acceleration for the real 0.6B test; software GPU chat can take much longer. This manual check is separate from CI’s bounded tiny-model tests.

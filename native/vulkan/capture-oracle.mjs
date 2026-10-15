@@ -9,7 +9,7 @@ const modulePath=process.env.DUGA_WEBGPU_MODULE;
 if(!modulePath)throw Error('Set DUGA_WEBGPU_MODULE to the installed Dawn webgpu package entry point.');
 const { create,globals }=await import(pathToFileURL(path.resolve(modulePath)).href);
 Object.assign(globalThis,globals);
-const gpu=create(['backend=vulkan',...(process.env.DUGA_ORACLE_ADAPTER?[`adapter=${process.env.DUGA_ORACLE_ADAPTER}`]:[])]);
+const gpu=create(['backend=vulkan',...(process.env.DUGA_ORACLE_ADAPTER?[`adapter=${process.env.DUGA_ORACLE_ADAPTER}`]:[]),...(process.env.DUGA_DAWN_REFERENCE_EXPORT==='1'?['enable-dawn-features=dump_shaders,disable_symbol_renaming','disable-dawn-features=use_vulkan_memory_model,use_spirv_1_4,use_spirv_reconvergence_mode']:[])]);
 const adapter=await gpu.requestAdapter();if(!adapter)throw Error('WebGPU oracle adapter unavailable');
 const device=await adapter.requestDevice();
 const errors=[];device.addEventListener('uncapturederror',e=>errors.push(e.error.message));

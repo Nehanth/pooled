@@ -12,7 +12,7 @@ export function compile(out, compiler = process.env.NAGA || 'naga') {
   const version=spawnSync(compiler,['--version'],{encoding:'utf8'});
   if(version.status!==0||version.stdout.trim()!=='30.0.1')throw Error('The native port requires naga-cli 30.0.1.');
   fs.mkdirSync(out,{recursive:true});
-  let header = '#pragma once\n#include <cstddef>\n#include <cstdint>\nnamespace duga {\nstruct Shader { const char* name; const uint32_t* code; size_t bytes; uint32_t bindings; uint32_t uniforms; };\n';
+  let header = '#pragma once\n#include <cstddef>\n#include <cstdint>\nnamespace duga {\nstruct Shader { const char* name; const uint32_t* code; size_t bytes; uint32_t bindings; uint32_t uniforms; const char* entryPoint = nullptr; };\n';
   const entries = [], manifest = [];
   for(const entry of KERNELS) {
     const source = pruneWGSL(SOURCE,entry);

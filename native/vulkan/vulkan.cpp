@@ -1,5 +1,6 @@
 #include "vulkan.hpp"
 #include "shaders.hpp"
+#include "oracle-shaders.hpp"
 #include <algorithm>
 
 namespace duga {
@@ -65,7 +66,10 @@ Buffer* Vulkan::buffer(size_t bytes,const void* src){
 }
 Vulkan::Pipeline& Vulkan::pipeline(const std::string& name){
   auto it=pipelines_.find(name);if(it!=pipelines_.end())return it->second;
-  const Shader* shader=nullptr;for(const auto& s:SHADERS)if(name==s.name){shader=&s;break;}if(!shader)throw std::runtime_error("Unknown compiled kernel");
+  const Shader* shader=nullptr;
+  if(name.rfind("oracle:",0)==0){for(const auto& s:ORACLE_SHADERS)if(name.substr(7)==s.name){shader=&s;break;}}
+  else {for(const auto& s:SHADERS)if(name==s.name){shader=&s;break;}}
+  if(!shader)throw std::runtime_error("Unknown compiled kernel");
   auto& p=pipelines_[name];p.bindings=shader->bindings;p.uniforms=shader->uniforms;
   for(uint32_t group=0;group<2;group++){
     const uint32_t count=group==0?2:p.bindings;std::vector<VkDescriptorSetLayoutBinding> bs(count);
@@ -74,7 +78,7 @@ Vulkan::Pipeline& Vulkan::pipeline(const std::string& name){
   }
   VkPipelineLayoutCreateInfo pl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};pl.setLayoutCount=2;pl.pSetLayouts=p.layouts;vkCheck(vkCreatePipelineLayout(device_,&pl,nullptr,&p.layout),"pipeline layout");
   VkShaderModule module{};VkShaderModuleCreateInfo sm{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};sm.codeSize=shader->bytes;sm.pCode=shader->code;vkCheck(vkCreateShaderModule(device_,&sm,nullptr,&module),"SPIR-V module");
-  VkComputePipelineCreateInfo cp{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};cp.layout=p.layout;cp.stage.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;cp.stage.stage=VK_SHADER_STAGE_COMPUTE_BIT;cp.stage.module=module;cp.stage.pName=shader->name;
+  VkComputePipelineCreateInfo cp{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};cp.layout=p.layout;cp.stage.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;cp.stage.stage=VK_SHADER_STAGE_COMPUTE_BIT;cp.stage.module=module;cp.stage.pName=shader->entryPoint?shader->entryPoint:shader->name;
   auto result=vkCreateComputePipelines(device_,VK_NULL_HANDLE,1,&cp,nullptr,&p.pipeline);vkDestroyShaderModule(device_,module,nullptr);vkCheck(result,"compute pipeline");return p;
 }
 Operation Vulkan::operation(const std::string& name,Buffer* config,Buffer* frame,const std::vector<Binding>& bindings,uint32_t groups){

@@ -29,5 +29,7 @@ try {
   run(adb,['-s',serial,'push','native/vulkan/build/oracle.dvk',`${remote}/oracle.dvk`]);
   run(adb,['-s',serial,'shell','chmod','755',`${remote}/oracle`]);
   run(adb,['-s',serial,'shell',`${remote}/oracle`,`${remote}/oracle.dvk`]);
+  run(adb,['-s',serial,'shell',`${remote}/oracle`,`${remote}/oracle.dvk`,'--reference']);
+  run(adb,['-s',serial,'shell',`${remote}/oracle`,`${remote}/oracle.dvk`,'--on-device']);
 } finally {run(adb,['-s',serial,'shell','rm','-rf',remote]);}
 run(process.execPath,['native/vulkan/check-model.mjs'],{...process.env,ADB:adb,DUGA_ANDROID_SERIAL:serial,DUGA_NATIVE_RUNNER:`${out}/duga-vk-model`});
