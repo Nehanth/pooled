@@ -1,7 +1,7 @@
 name: Android APK and AAB
 on:
   pull_request:
-    paths: ['android/**', 'native/**', 'app/**', 'engine/**', 'room/**', 'room.js', 'p2p.html', 'index.html', 'site/**', 'scripts/android-*', '.github/workflows/android.yml']
+    paths: ['android/**', 'native/**', 'app/**', 'engine/**', 'room/**', 'room.js', 'p2p.html', 'index.html', 'site/**', 'scripts/android-*', 'tests/duga/**', '.github/workflows/android.yml']
   push:
     branches: [main, feat/duga-android]
     tags: ['android-v*']
@@ -111,7 +111,11 @@ jobs:
           grep -q "jar verified" "$RUNNER_TEMP/aab-signature.txt"
       - name: Verify 16 KB native-library ZIP alignment
         run: |
-          find android/app/build/outputs/apk -name "*.apk" -exec "$ANDROID_HOME/build-tools/35.0.0/zipalign" -c -P 16 4 {} \;
+          mapfile -t apks < <(find android/app/build/outputs/apk -name '*.apk' -type f -print)
+          test "${#apks[@]}" -gt 0
+          for apk in "${apks[@]}"; do
+            "$ANDROID_HOME/build-tools/35.0.0/zipalign" -c -P 16 4 "$apk"
+          done
       - name: Package delivery files and checksums
         run: |
           mkdir -p android-delivery
