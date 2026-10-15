@@ -2,10 +2,11 @@
 // room node (packages/room-node: Pooled's engine on Dawn, the room protocol over node-datachannel).
 // Foreground only: it runs until Ctrl-C, which leaves the room and frees the GPU.
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, statfsSync } from "node:fs";
 import os from "node:os";
 import { parseLendArgs, parseGb, detectMemory, memoryRule, ramRule, diskRule, afterCheck, formatStatus, tpsFromStats, explainError, versionFromBye,
-  hostable, devHint, ctxNote, autoRedeal, fmtGb, fmtCode, passCounter, deviceName, UsageError, HELP_JOIN, HELP_HOST, needsRoom, loadText } from "./lend.js";
+  hostable, devHint, ctxNote, autoRedeal, fmtGb, fmtCode, passCounter, deviceName, UsageError, HELP_JOIN, HELP_HOST, needsRoom, loadText,
+  pullPlan, autoLine, LEND_MAX_GB } from "./lend.js";
 import { dawnLoader, quietLoader, driverLog } from "./dawn.js";
 import { cleanText } from "./common.js";
 import { roomCodeFrom, roomKeyFrom } from "./room.js";
@@ -109,6 +110,54 @@ function fail(out, err, ctx) {
   return x.code;
 }
 
+// what the OS says about this computer's GPU memory (no Dawn needed)
+const readMemory = () => detectMemory({
+  run: (cmd, args) => execFileSync(cmd, args, { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }),
+  read: (p) => readFileSync(p, "utf8"), totalmem: os.totalmem, freemem: os.freemem,
+});
+// free bytes where the models live (null when the OS won't say)
+export function freeDiskBytes(dir) {
+  try { const f = statfsSync(dir); return Number(f.bavail) * Number(f.bsize); } catch { return null; }
+}
+// pooled join: what it would do with the host's model `key` (cache.js modelState, pullPlan) -> { label, plan, moe }
+export function modelPlan(rn, key, opts) {
+  const st = modelState(opts.modelDir, key, rn.MODELS, rn.FILES, rn.LOCAL);
+  const plan = pullPlan({ st, bytes: rn.FILES?.[key]?.bytes || 0, freeBytes: st.pulled ? null : freeDiskBytes(opts.modelDir), pull: opts.pull, noPull: opts.noPull, key });
+  return { key, label: rn.MODELS[key].label.split("·")[0].trim(), plan, moe: (rn.SHAPE?.[key]?.exp || 0) > 0, bytes: rn.FILES?.[key]?.bytes || 0 };
+}
+
+// pooled join --dry-run: what it would lend and, for each model a room may run, what it would do with it. No GPU work
+// (no Dawn, no test allocation) and no network: safe next to a running room.
+async function runDry(opts) {
+  const rn = await loadRoomNode();
+  const mem = readMemory();
+  const rule = memoryRule(mem, opts.gb, { autoCapGB: LEND_MAX_GB });
+  const ram = ramRule(mem, opts.ram, { totalGB: os.totalmem() / 2 ** 30, freeGB: os.freemem() / 2 ** 30 });
+  const disk = diskRule(mem, opts.disk, ram);
+  const w = (s) => process.stdout.write(s + "\n");
+  const gpu = mem.kind === "discrete" ? `${mem.name} · ${fmtGb(mem.totalGB)} GB, ${fmtGb(mem.freeGB)} GB free` : mem.kind === "unified" ? `${mem.name} · ${fmtGb(mem.totalGB)} GB unified memory` : mem.why;
+  w(`pooled join --dry-run: nothing joined`);
+  w(`  GPU      ${gpu}`);
+  w(`  RAM      ${fmtGb(os.totalmem() / 2 ** 30)} GB, ${fmtGb(os.freemem() / 2 ** 30)} GB free`);
+  const fb = freeDiskBytes(opts.modelDir);
+  w(`  disk     ${fb == null ? "free space unknown" : `${fmtGb(fb / 1e9)} GB free`} in ${opts.modelDir}`);
+  if (rule.low) { w(`  can't lend: ${rule.why}`); return 1; }
+  w("");
+  w(autoLine({ rule, ram, disk, mem }));
+  if (opts.disk && !disk.on) w(`  (${disk.why})`);
+  w("");
+  w("In a room running:");
+  const keys = Object.keys(rn.MODELS).filter((k) => rn.FILES?.[k] && (hostable(rn.MODELS, true).includes(k)));
+  for (const k of keys) {
+    const m = modelPlan(rn, k, opts);
+    const p = m.plan;
+    const how = p.local ? (disk.on && m.moe ? "on this computer: loads from disk; experts read from its files if RAM runs short" : "on this computer: loads from disk")
+      : p.pull ? `downloads it first (${p.why})` : `streams this computer's layers (${p.why})`;
+    w(`  ${k.padEnd(18)} ${how}`);
+  }
+  return 0;
+}
+
 // GPU + memory, before anything joins: -> { rn, pledge, rule, adapterName }
 export async function prepare(opts, out) {
   const rn = await loadRoomNode();
@@ -120,13 +169,12 @@ export async function prepare(opts, out) {
   if (!adapter) throw Object.assign(new Error("no WebGPU adapter"), { type: "no-adapter", driver: verbose ? "" : driverLog() });
   const info = adapter.info || {};
   const adapterName = [...new Set([info.vendor, info.architecture || info.device].filter(Boolean))].join(" ") || "GPU";
-  const mem = detectMemory({
-    run: (cmd, args) => execFileSync(cmd, args, { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }),
-    read: (p) => readFileSync(p, "utf8"), totalmem: os.totalmem, freemem: os.freemem,
-  });
-  // an explicit pledge goes past 64 GB only for Qwen3.8-Flash-Next (room/pledge.js maxPledgeGB); a join's model is not known yet
+  const mem = readMemory();
+  // an explicit pledge goes past 64 GB only for Qwen3.8-Flash-Next (room/pledge.js maxPledgeGB); a join's model is not known
+  // yet, so its own rule may say up to 128 GB too (a big unified-memory machine in a Flash room): the host counts at most
+  // its model's cap of it
   const capGB = opts.cmd === "host" && opts.modelGiven && rn.maxPledgeGB ? rn.maxPledgeGB(opts.model) : undefined;
-  let rule = memoryRule(mem, opts.gb, { maxBufGB: adapter.limits.maxBufferSize / 2 ** 30, capGB });
+  let rule = memoryRule(mem, opts.gb, { maxBufGB: adapter.limits.maxBufferSize / 2 ** 30, capGB, autoCapGB: opts.cmd === "join" ? LEND_MAX_GB : undefined });
   if (rule.low) throw Object.assign(new Error(rule.why), { type: "low-memory" });
   // a discrete GPU's own memory: allocate it for a moment to make sure it is there. Not on unified
   // memory: the OS's numbers are the memory itself there, and touching 64 GB of it takes ~20 s (GB10)
@@ -244,6 +292,7 @@ async function runJoin(opts, out) {
       // the host's model (from its hello, which may come a moment after the link opens, or change
       // when the host picks another): download it now, before the host deals, unless --no-pull
       const hostKey = hm.model && rn.MODELS[hm.model] ? hm.model : null;
+      if (hostKey && pledged) sayPlan(hostKey);
       if (hostKey && pledged && !opts.noPull && !onDisk.has(hostKey) && pulling?.key !== hostKey) ensurePulled(hostKey).catch(() => {});
       if (S.phase === "lobby") S.lobbyAt ||= Date.now();
       if (S.phase === "online" || S.phase === "answering") S.onlineAt ||= Date.now();
@@ -255,10 +304,20 @@ async function runJoin(opts, out) {
   // every later one reads from disk; --no-pull streams this device's layers from Hugging Face instead.
   // A deal that comes while it downloads waits for it (the room node's beforeLoad)
   let pulling = null, pledged = null;
-  const onDisk = new Set();
+  const onDisk = new Set(), streamed = new Set();
+  // the one line on what this computer lends and why (lend.js autoLine), once per host model
+  let saidFor;
+  const sayPlan = (key) => {
+    if (saidFor === key) return;
+    saidFor = key;
+    out.print(autoLine({ rule: { ...rule, gb: lendGB }, ram, disk, mem, model: key && rn.MODELS[key] ? modelPlan(rn, key, opts) : null }));
+  };
   const ensurePulled = async (key) => {
-    if (opts.noPull || onDisk.has(key) || !rn.MODELS[key] || !rn.FILES?.[key]) return;
-    if (modelState(opts.modelDir, key, rn.MODELS, rn.FILES, rn.LOCAL).pulled) { onDisk.add(key); return; }
+    if (opts.noPull || onDisk.has(key) || streamed.has(key) || !rn.MODELS[key] || !rn.FILES?.[key]) return;
+    const plan = modelPlan(rn, key, opts).plan;
+    if (plan.local) { onDisk.add(key); return; }
+    // too big to wait for, or no room on the disk for it: this device streams its own layers (pullPlan)
+    if (!plan.pull) { streamed.add(key); return; }
     await pledged;
     if (pulling?.key !== key) pulling = { key, p: pullFirst(key) };
     await pulling.p;
@@ -280,7 +339,11 @@ async function runJoin(opts, out) {
       r = await pullWithProgress(rn, key, opts.modelDir, { quiet: opts.jsonLog });
       prompting = false;
     }
-    if (r.ok) { onDisk.add(key); out.log(`${key} downloaded: loading from disk`); }
+    if (r.ok) {
+      onDisk.add(key); out.log(`${key} downloaded: loading from disk`);
+      // the host's next deal may read this model's experts from disk here (--disk): tell it the files are here now
+      try { node?.announceLocal?.(); } catch {}
+    }
     else if (!r.aborted) out.log(`download failed (${cleanText(r.error?.message || "", 200)}): streaming the layers from Hugging Face instead; pooled pull ${key} resumes it`, "error");
     tick();
   };
@@ -344,10 +407,11 @@ async function runJoin(opts, out) {
     }
     if (!leaving) finish({ type: "room-over" });
   };
-  // a terminal and no --gb: ask how much to lend before knocking, so the host's "wants to join"
-  // line (and its Allow prompt) shows the amount this device really lends, not the default
+  // pooled join alone at a terminal (it asked for the room) and no --gb: ask how much to lend before knocking, so the
+  // host's "wants to join" line (and its Allow prompt) shows the amount this device really lends. Given the room on the
+  // command line, it asks nothing: the memory rule's amount (printed with why, sayPlan), so the pledge goes out at once
   let lendGB = rule.gb;
-  if ((opts.interactive || opts.lines) && !opts.gb) {
+  if ((opts.interactive || opts.lines) && !opts.gb && opts.askCode) {
     prompting = true; out.done();
     out.print(`  room     ${fmtCode(code)}`);
     const max = Math.max(rule.gb, memoryRule(mem, { max: true }).gb || rule.gb);
@@ -381,6 +445,7 @@ async function runJoin(opts, out) {
   if (out.tty && process.stdin.isTTY) {
     try { process.stdin.setRawMode(true); process.stdin.resume(); process.stdin.on("data", (b) => { for (const k of KEYS(b)) if (k === "q" || k === "ctrl-c") bye(true); }); } catch {}
   }
+  sayPlan(hostModel);
   if (hostModel) await ensurePulled(hostModel);
   const timer = setInterval(tick, 1000);
   // plain (non-TTY) output: a status line when the phase changes, and once a minute while it runs
@@ -630,7 +695,7 @@ export async function lendMain(cmd, argv, { version = "" } = {}) {
   const caps = termCaps();
   opts.interactive = caps.ansi && !opts.jsonLog;
   opts.lines = caps.tty && !caps.ansi && !opts.jsonLog;
-  if (cmd === "join" && !opts.code) {
+  if (cmd === "join" && !opts.code && !opts.dryRun) {
     if (!opts.interactive && !opts.lines) { process.stderr.write(needsRoom("join") + "\n"); return 2; }
     for (;;) {
       const a = await askLine("Room code or invite link: ");
@@ -643,6 +708,7 @@ export async function lendMain(cmd, argv, { version = "" } = {}) {
   }
   const out = makeOut(opts);
   try {
+    if (cmd === "join" && opts.dryRun) return await runDry(opts);
     if (cmd === "join") return await runJoin(opts, out);
     if (opts.interactive) {
       const prepared = await prepare(opts, out);

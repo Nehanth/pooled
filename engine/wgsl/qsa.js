@@ -97,13 +97,20 @@ fn qsa_proj(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) 
 }
 `;
 
+// rawK as a ring (qsaWGSL rawRing = R, a power of two): row p lives in slot p % R. qsa_pool reads only the rows of
+// the blocks a pass completes, 4 * floor(pos / 4) .. pos + nCols - 1 (at most nCols + 3 rows), so a ring of
+// R >= nCols + 3 rows serves every pass of up to nCols columns with the same values as a whole-context rawK
+// (the caller checks it: engine/qwen4exp_batch.js). rawRing 0: rawK holds every position (engine/qsa.js, the tests).
+const rawRow = (ring, r) => (ring ? `((${r}) & ${ring - 1}u)` : r);
+export const qsaRingOk = (ring) => ring === 0 || (Number.isInteger(ring) && ring >= 8 && (ring & (ring - 1)) === 0);
+
 // --- qsa_prep: one workgroup per (head 0..4, column). Heads 0-3: rmsnorm * q_norm, rope(p) -> qi.
 // Head 4: the raw key -> rawK[p] as f16 pairs. Sum of squares by a fixed tree. ---
-const prepWGSL = /* wgsl */ `
+const prepWGSL = (ring) => /* wgsl */ `
 @group(1) @binding(0) var<storage, read> pr_proj: array<f32>;
 @group(1) @binding(1) var<storage, read> pr_qn: array<f32>;
 @group(1) @binding(2) var<storage, read_write> pr_qi: array<f32>;
-@group(1) @binding(3) var<storage, read_write> pr_raw: array<u32>;   // [maxSeq][64] f16 pairs
+@group(1) @binding(3) var<storage, read_write> pr_raw: array<u32>;   // [maxSeq or ring rows][64] f16 pairs
 @group(1) @binding(4) var<uniform> pr_u: QS;
 var<workgroup> pr_v: array<f32, 128>;
 var<workgroup> pr_s: array<f32, 128>;
@@ -115,7 +122,7 @@ fn qsa_prep(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) 
   if (h == 4u) {   // raw key: no norm, no rope
     pr_v[i] = v;
     workgroupBarrier();
-    if (i < 64u) { pr_raw[p * 64u + i] = pack2x16_rne(vec2<f32>(pr_v[2u * i], pr_v[2u * i + 1u])); }
+    if (i < 64u) { pr_raw[${rawRow(ring, "p")} * 64u + i] = pack2x16_rne(vec2<f32>(pr_v[2u * i], pr_v[2u * i + 1u])); }
     return;
   }
   pr_s[i] = v * v;
@@ -134,14 +141,14 @@ fn qsa_prep(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) 
 
 // --- qsa_pool: workgroup w handles block b = floor(pos / 4) + w when the pass completes it (pos <= 4b+3 < pos +
 // nCols); one thread per dim. Sum ((r0 + r1) + r2) + r3, * 0.25, rmsnorm (fixed tree) * k_norm, rope(4b). ---
-const poolWGSL = /* wgsl */ `
+const poolWGSL = (ring) => /* wgsl */ `
 @group(1) @binding(0) var<storage, read> pl_raw: array<u32>;
 @group(1) @binding(1) var<storage, read> pl_kn: array<f32>;
 @group(1) @binding(2) var<storage, read_write> pl_out: array<u32>;   // [maxBlocks][64] f16 pairs
 @group(1) @binding(3) var<uniform> pl_u: QS;
 var<workgroup> pl_v: array<f32, 128>;
 var<workgroup> pl_s: array<f32, 128>;
-fn pl_raw_at(row: u32, d: u32) -> f32 { let w = unpack2x16_exact(pl_raw[row * 64u + d / 2u]); return select(w.x, w.y, (d & 1u) == 1u); }
+fn pl_raw_at(row: u32, d: u32) -> f32 { let w = unpack2x16_exact(pl_raw[${rawRow(ring, "row")} * 64u + d / 2u]); return select(w.x, w.y, (d & 1u) == 1u); }
 @compute @workgroup_size(128)
 fn qsa_pool(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
   let i = lid.x;
@@ -319,7 +326,8 @@ fn qsa_select(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id
 `;
 
 // every QSA kernel but the attention in one module (entry points qsa_proj, qsa_prep, qsa_pool, qsa_score,
-// qsa_score_c4, qsa_select)
-export function qsaWGSL({ scoreCW = [1, 4] } = {}) {
-  return header + projWGSL + prepWGSL + poolWGSL + scoreCW.map(scoreWGSL).join("") + selectWGSL;
+// qsa_score_c4, qsa_select). rawRing: rawK's rows when it is a ring (a power of two), 0 for the whole context.
+export function qsaWGSL({ scoreCW = [1, 4], rawRing = 0 } = {}) {
+  if (!qsaRingOk(rawRing)) throw new Error(`QSA: rawK ring of ${rawRing} rows (0, or a power of two >= 8)`);
+  return header + projWGSL + prepWGSL(rawRing) + poolWGSL(rawRing) + scoreCW.map(scoreWGSL).join("") + selectWGSL;
 }

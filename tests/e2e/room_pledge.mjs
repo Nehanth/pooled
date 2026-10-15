@@ -79,9 +79,12 @@ try {
   await laptop.fill("#name-input", "Laptop"); await laptop.fill("#join-gb", "3");
   await phone.fill("#name-input", "iPhone"); await phone.fill("#join-gb", "1");
   await laptop.click("#create-btn");
-  await laptop.waitForFunction(() => /[A-Z0-9]{4}/.test(document.getElementById("room-badge").textContent), null, { timeout: 30000 });
-  const code = (await laptop.textContent("#room-badge")).trim().match(/[A-Z0-9]{4}/)[0];
+  // the code reads "ABC-D12" (room/joingate.js formatCode)
+  await laptop.waitForFunction(() => /[A-Z0-9]{3}-?[A-Z0-9]{3}/.test(document.getElementById("room-badge").textContent), null, { timeout: 30000 });
+  const code = (await laptop.textContent("#room-badge")).trim().replace(/[^A-Z0-9]/g, "");
   await phone.fill("#code-input", code); await phone.click("#join-btn");
+  // a device that types the code asks the room's creator first (room/joingate.js): let it in
+  await laptop.waitForSelector("#jr-allow", { state: "visible", timeout: 30000 }); await laptop.click("#jr-allow");
   for (const p of [laptop, phone]) await p.waitForFunction(() => document.querySelectorAll(".peer-card").length >= 2, null, { timeout: 60000 });
   await laptop.waitForTimeout(1500);
   const pools = await laptop.evaluate(() => document.getElementById("ap-total").textContent);
@@ -95,7 +98,7 @@ try {
   await pick(laptop, "qwen3.8-27b");
   v = await view(laptop);
   check(v.start === "off", "Qwen3.8 27B: Start off");
-  check(/^This room is [\d.]+ GB short for Qwen3\.8 27B\. Add a device or raise a pledge/.test(v.short), `27B short message: "${v.short}"`);
+  check(/^This room is [\d.]+ GB short for Qwen3\.8 27B\. Invite a device, or give more GPU memory on the right/.test(v.short), `27B short message: "${v.short}"`);
   check(/GB short/.test(v.need), `pool card says short: "${v.need}"`);
   if (SHOTS) { fs.mkdirSync(SHOTS, { recursive: true }); await laptop.locator("#ai-panel").screenshot({ path: path.join(SHOTS, "short-27b.png") }); }
 
@@ -105,7 +108,7 @@ try {
   await laptop.waitForFunction(() => document.getElementById("ap-total").textContent === "3 GB", null, { timeout: 5000 }).catch(() => {});
   v = await view(laptop);
   check(v.start === "off", `Laptop 2 GB + iPhone 1 GB for Qwen3 1.7B: Start off (${JSON.stringify(v.rows)})`);
-  check(/^This room is [\d.]+ GB short for Qwen3 1\.7B\. Add a device or raise a pledge/.test(v.short), `1.7B short message: "${v.short}"`);
+  check(/^This room is [\d.]+ GB short for Qwen3 1\.7B\. Invite a device, or give more GPU memory on the right/.test(v.short), `1.7B short message: "${v.short}"`);
   check(!/iPhone could give/.test(v.short), "the iPhone, at its 1 GB cap, is not asked for more");
   const pv = await (async () => { await phone.waitForTimeout(800); await pick(phone, "qwen3-1.7b"); return view(phone); })();
   check(/GB short for Qwen3 1\.7B/.test(pv.short) && pv.start === "off", `the phone's screen says the same: "${pv.short}"`);

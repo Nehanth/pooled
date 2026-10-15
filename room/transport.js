@@ -73,11 +73,13 @@ export function unpackFlags(f) {
 // highest frame id received on it>, closedAt: when a wire channel of this link last closed,
 // unordered: some channel may drop messages (attachWire { ordered: false }), dup: frames of up to
 // this many slices are sent twice (0 = never), rxAt: when anything last arrived on this link's
-// wire (a slice of a frame or a keep-alive byte: a sign of life, room/liveness.js), ka*: keep-alive }
+// wire (a slice of a frame or a keep-alive byte: a sign of life, room/liveness.js), ka*: keep-alive,
+// out / outHead / outTimer: slices waiting for the channels to drain (back-pressure), waited: slices
+// that waited there, lost: slices no channel took }
 export function makeLink({ dup = DUP_SLICES } = {}) {
   return { chans: [], rr: 0, rx: new Map(), nextId: 1, sent: 0, recv: 0, expect: 1, done: new Map(), gapTimer: null, gapFor: 0,
     hi: new Map(), closedAt: null, unordered: false, dup, dups: 0, skipped: 0,
-    ka: [], kaRr: 0, kaSent: 0, lastTx: 0, active: 0, rxAt: 0 };
+    ka: [], kaRr: 0, kaSent: 0, lastTx: 0, active: 0, rxAt: 0, out: [], outHead: 0, outTimer: null, waited: 0, lost: 0 };
 }
 
 // Open the wire channel on a PeerJS DataConnection's RTCPeerConnection. Both sides call this with
@@ -159,6 +161,8 @@ export function sendFrame(link, msg) {
   const pos = msg.t === "ai-hidden" || msg.t === "ai-hiddenret" ? msg.pos : msg.basePos;
   const flags = packFlags(msg);
   const dup = open.length > 1 && nSlices <= link.dup;
+  // behind slices still waiting for the channels to drain, this frame waits too (frames go out in order)
+  let queued = link.out.length > link.outHead;
   for (let k = 0, off = 0; k < nSlices; k++) {
     const len = Math.min(per, bytes.length - off);
     const buf = new ArrayBuffer(HDR + len), dv = new DataView(buf);
@@ -168,12 +172,50 @@ export function sendFrame(link, msg) {
     packCkpt(dv, msg);
     new Uint8Array(buf, HDR).set(bytes.subarray(off, off + len));
     off += len;
+    if (queued) { link.out.push(buf); continue; }
     // spread over associations so a block never waits on one congestion window
     const ch = pick(link, open, null);
-    put(link, open, ch, buf);
+    if (full(ch, buf) || !put(link, open, ch, buf)) { queued = true; link.out.push(buf); continue; }
     if (dup) { put(link, open, pick(link, open, ch), buf); link.dups++; }
   }
+  if (queued) drainLater(link);
   return true;
+}
+// Back-pressure. A browser's data channel refuses a send while 16 MiB wait in its queue (Chrome: "RTCDataChannel send
+// queue is full"), and a refused slice loses its frame: a host whose layers read experts from disk sends 4096-column
+// Qwen3.8-Flash-Next prompt frames (room/flash.js diskFrames), 80 MiB each, and the next device waited for them
+// forever. A slice that would take a channel past SEND_HIGH bytes queued waits on the link (link.out), and so does
+// everything sent after it; it goes out as the channels drain (bufferedamountlow, and a timer for a runtime without
+// the event). Small frames on a quiet link go straight out as before.
+export const SEND_HIGH = 8 << 20;
+const DRAIN_MS = 25;
+const full = (ch, buf) => (ch.bufferedAmount || 0) + buf.byteLength > SEND_HIGH;
+function drainLater(link) {
+  if (link.outTimer) return;
+  link.outTimer = setTimeout(() => drainNow(link), DRAIN_MS);
+  for (const c of link.chans) {
+    if (!c.addEventListener || c.lowHooked) continue;
+    c.lowHooked = true;
+    try { c.bufferedAmountLowThreshold = SEND_HIGH >> 1; } catch {}
+    c.addEventListener("bufferedamountlow", () => drainNow(link));
+  }
+}
+function drainNow(link) {
+  if (!link.outTimer) return;
+  clearTimeout(link.outTimer); link.outTimer = null;
+  drain(link);
+}
+function drain(link) {
+  while (link.outHead < link.out.length) {
+    const open = link.chans.filter((c) => c.readyState === "open");
+    // no channel left: what waited is lost, as a slice no channel takes (the receiver skips its frames)
+    if (!open.length) { link.lost += link.out.length - link.outHead; break; }
+    const buf = link.out[link.outHead], ch = pick(link, open, null);
+    if (full(ch, buf) || !put(link, open, ch, buf)) { drainLater(link); return; }
+    link.out[link.outHead++] = null;
+    link.waited++;
+  }
+  link.out = []; link.outHead = 0;
 }
 // The open channel with the least data queued, starting the search at the round-robin position so
 // equal channels take turns. A channel whose association lost a packet holds its later messages
@@ -188,8 +230,8 @@ function pick(link, open, avoid) {
   link.rr++;
   return best;
 }
-// send, falling over to the other open channels if this one refuses (it closed under us); a slice
-// no channel takes is lost, and the receiver skips its frame once the close is seen
+// send, falling over to the other open channels if this one refuses (it closed under us, or its queue is full);
+// false when none took it: sendFrame and drain keep it for later
 function put(link, open, ch, buf) {
   for (const c of [ch, ...open.filter((o) => o !== ch)]) {
     if (!c || c.readyState !== "open") continue;

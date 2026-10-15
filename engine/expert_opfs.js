@@ -121,11 +121,16 @@ export function expertPartOf(info) {
 //   onProgress({ doneBytes, totalBytes, layer, skippedBytes })
 //   estimate: () -> Promise<{ quota, usage }> (navigator.storage.estimate), read only when a write runs out of room,
 //   for the error's message
+//   signal: an AbortSignal (the load stopped): no new chunk is read once it fires, the reads in flight are aborted
+//   (readAt's 4th argument { signal }), and the ingest throws its reason. The manifest is only ever saved after a
+//   flush, so it still says what the last checkpoint had, and the next run resumes there
 // -> { totalBytes, wroteBytes, skippedBytes, layers }
 // Out of room (a QuotaExceededError from a write, a flush or the manifest) it throws ingestQuotaError's error: how much
 // this run wrote, how much is on disk up to the last checkpoint, how much the copy needs and the estimate. The manifest
 // still says only what was flushed before the last checkpoint, so ingested() is false and the next run resumes there.
-export async function ingestExperts({ layout, readAt, store, chunkExperts = 16, readAhead = 4, inflight = 4, checkpointBytes = 256 * 2 ** 20, onProgress = null, estimate = null }) {
+export async function ingestExperts({ layout, readAt, store, chunkExperts = 16, readAhead = 4, inflight = 4, checkpointBytes = 256 * 2 ** 20, onProgress = null, estimate = null, signal = null }) {
+  const stopped = () => { if (signal?.aborted) throw signal.reason ?? Object.assign(new Error("the copy was stopped"), { name: "AbortError" }); };
+  stopped();
   let m = await store.manifest();
   if (!m || m.version !== layout.version || m.key !== layout.key) m = { version: layout.version, key: layout.key, layers: {} };
   const ids = Object.keys(layout.layers).map(Number);
@@ -148,22 +153,24 @@ export async function ingestExperts({ layout, readAt, store, chunkExperts = 16, 
       const geo = PARTS.map((p) => expertGeometry(L.parts[p]));
       const readChunk = async (e0, n) => Promise.all(PARTS.map(async (p, i) => {
         const info = L.parts[p], len = n * geo[i].expBytes, off = info.byteOffset + e0 * geo[i].expBytes;
-        const b = await readAt(info.shard || 0, off, len);
+        const b = await (signal ? readAt(info.shard || 0, off, len, { signal }) : readAt(info.shard || 0, off, len));
         if (b.byteLength < len) throw new Error(`expert OPFS ingest: short read of ${info.name} experts ${e0}..${e0 + n - 1} (${b.byteLength} of ${len} B)`);
         return { off, b };
       }));
       let since = 0, e0 = ent.done, eRead = e0;
       const reads = [];   // the next readAhead chunks, being read while this one converts
       const more = () => {
-        while (reads.length < Math.max(1, readAhead) && eRead < L.nExp) {
+        while (reads.length < Math.max(1, readAhead) && eRead < L.nExp && !signal?.aborted) {
           const p = readChunk(eRead, Math.min(chunkExperts, L.nExp - eRead));
           p.catch(() => {});   // (a failure surfaces where it is awaited)
           reads.push(p); eRead += chunkExperts;
         }
       };
       while (e0 < L.nExp) {
+        stopped();
         more();
         const n = Math.min(chunkExperts, L.nExp - e0), raw = await reads.shift();
+        stopped();
         const e1 = e0 + n;
         more();
         const rec = new Uint8Array(n * L.recBytes);
@@ -343,6 +350,12 @@ export async function readManifest(dir) {
   } catch { return null; }
 }
 
+// Save a copy's manifest (dir: its OPFS path): through a writable, atomic on close
+export async function saveExpertManifest(dir, m) {
+  const w = await (await (await opfsDir(dir, true)).getFileHandle("manifest.json", { create: true })).createWritable();
+  await w.write(JSON.stringify(m)); await w.close();
+}
+
 // The OPFS writer for ingestExperts: one worker, a read-write sync access handle per layer file while it is written.
 // dir: the path from the OPFS root (default [EXPERT_OPFS_DIR, layout.key]). Asks for persistent storage (Chrome grants
 // or denies it without a prompt; denied, the copy can be evicted under storage pressure) -> the store, with persisted.
@@ -353,10 +366,7 @@ export async function opfsExpertStore(layout, { dir = [EXPERT_OPFS_DIR, layout.k
   return {
     dir, persisted,
     manifest: () => readManifest(dir),
-    async saveManifest(m) {
-      const w = await (await (await opfsDir(dir, true)).getFileHandle("manifest.json", { create: true })).createWritable();
-      await w.write(JSON.stringify(m)); await w.close();
-    },
+    saveManifest: (m) => saveExpertManifest(dir, m),
     open: (l, keep) => rpc.call(0, { op: "wopen", dir, name: name(l), keep }),
     write: (l, at, bytes) => { const buf = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : bytes.slice().buffer; return rpc.call(0, { op: "write", name: name(l), at, buf }, [buf]); },
     flush: (l) => rpc.call(0, { op: "flush", name: name(l) }),
@@ -468,6 +478,9 @@ export class OpfsExpertReader {
       }, (err) => js.forEach(([r]) => r.reject(err)));
     });
   }
+  // one expert's whole record (its six slices at layout.layers[layer].offs; room/flashdisk.js reads a resident layer's
+  // experts this way, every part from one read) -> Promise<Uint8Array>
+  record(layer, e) { return this._record(layer, e); }
   // ExpertStore's reader interface: expert e of a stacked tensor -> { qs, sc } in the engine's layout
   async readPart(info, e) {
     const { layer, part } = expertPartOf(info), L = this.layout.layers[layer];

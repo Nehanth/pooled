@@ -8,6 +8,8 @@
 // the host, on ai-error from `from`: does it stop the start? Only a load error, from a device in the
 // chain, while the start is still running (not after the room went online: then it is a lost device,
 // and the Re-deal path handles it).
+import { flashKey } from "./resume.js";
+
 export function stopsStart({ load, inChain, starting, online }) {
   return !!(load && inChain && starting && !online);
 }
@@ -23,7 +25,9 @@ export function stopReason(startFailed, err) {
   return startFailed || err?.message || String(err ?? "the start was stopped");
 }
 
-export const loadKey = (model, range) => `${model || "smollm-135m"}:${range}`;
+// flash (Qwen3.8-Flash-Next's ai-load.flash): a QSA format is part of the key, so a load in flight in another format is
+// not kept for it (a dense key stays as before)
+export const loadKey = (model, range, flash = null) => `${model || "smollm-135m"}:${range}${flash?.qsa ? `:${flashKey(flash)}` : ""}`;
 
 // a worker, on ai-load: "keep" when the host re-seats it (it dropped this tab and it reconnected)
 // while its load of the same layers still runs: that load reports ai-ready when it is in. Otherwise

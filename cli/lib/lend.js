@@ -15,9 +15,13 @@ export const DISCRETE_RESERVE_GB = 1.5; // kept free on a discrete GPU (the desk
 export const UNIFIED_KEEP_GB = 8;       // kept for the system on unified memory: at least this much
 export const UNIFIED_KEEP_FRAC = 0.35;  // ... or this share of it, whichever is more
 export const LINUX_AVAIL_SLACK_GB = 2;  // unified memory on Linux: never more than what is free now, less this
-export const RAM_KEEP_GB = 16;          // expert offload (--ram): system RAM kept for the OS and other apps
+export const RAM_KEEP_GB = 16;          // expert offload (--ram): system RAM kept for the OS and other apps: at least this
+export const RAM_KEEP_FRAC = 0.25;      // ... or this share of it, whichever is more (a 128 GB machine keeps 32)
 export const RAM_FREE_SLACK_GB = 4;     // ... and never more than what is free now, less this
 export const DISK_RAM_MIN_GB = 2;       // --disk: the least RAM the room keeps for the disk tier's cache (room/plan.js DISK_RAM_MIN)
+export const DISK_KEEP_GB = 20;         // pooled join downloads the room's model only when the disk keeps this much free after it
+export const AUTO_PULL_MAX_GB = 40;     // ... and only a model this big or smaller by itself (--pull: any size): a bigger one
+                                        // would hold the room's load for a long download; this device streams its layers instead
 export const UPDATE_HINT = "npx @pooled/cli@latest";
 
 export const HELP_JOIN = `Usage
@@ -27,15 +31,19 @@ export const HELP_JOIN = `Usage
   model's layers, and they run here until you press Ctrl-C (which leaves the room and frees the GPU).
   Needs a GPU that Dawn can use (Metal on macOS 26+, Vulkan on Linux, D3D12 on Windows).
 
-  In a terminal, pooled join alone asks for the code or link, shows the host's model and asks how
-  much to lend. A flag skips its question.
+  pooled join "<invite link>" asks nothing: it picks how much GPU memory and RAM to lend from this
+  computer (printed in one line at start, with why), lends it and holds layers as soon as the host
+  deals them. pooled join alone, in a terminal, asks for the code or link and how much to lend.
+  A flag overrides its automatic choice.
 
   Getting in: with the room's invite link (in quotes: "https://pooled.run/r/4TKG9P#k=..."), the
   host lets this computer in at once. With the code alone (4TK-G9P), a host that asks before new
   devices join sees "<name> wants to join" and this waits until it presses Allow.
 
   The layers load from ~/.pooled/models: when the host's model is not there yet, pooled join
-  downloads it first (as pooled pull does), so this and every later join load from disk.
+  downloads it first (as pooled pull does), so this and every later join load from disk, when it
+  is ${AUTO_PULL_MAX_GB} GB or smaller and the disk keeps ${DISK_KEEP_GB} GB free after it. Otherwise it streams only this
+  device's layers from Hugging Face (pooled pull <model> beforehand, or --pull, downloads it whole).
 
 Options
   --gb <n|max>      how much memory to lend, in GB. Default: the memory rule, printed at start:
@@ -50,13 +58,19 @@ Options
   --ram <n>         system RAM, in GB, a MoE model's experts may use when this GPU's pledge can't
                     hold the layers the room needs from it (expert offload: the GPU keeps a cache
                     of them; slower than layers held whole). Discrete GPUs only. Default: total
-                    RAM less ${RAM_KEEP_GB} GB (at most what is free less ${RAM_FREE_SLACK_GB}, and ${DESK_MAX_GB}); 0 never offloads
-  --disk            when even --ram can't hold the experts the room needs from this computer, leave
+                    RAM less max(${RAM_KEEP_GB} GB, ${Math.round(RAM_KEEP_FRAC * 100)}%) (at most what is free less ${RAM_FREE_SLACK_GB}, and ${DESK_MAX_GB}); 0 never offloads
+  --disk / --no-disk
+                    when even --ram can't hold the experts the room needs from this computer, leave
                     some layers' experts in the model's files and read them from the SSD when a
                     token picks them (a RAM cache keeps the ones used again). The room uses it only
                     when nothing else holds the model, and it is slower again: every token waits
-                    for some reads. Needs --ram (at least ${DISK_RAM_MIN_GB} GB) and the model downloaded here
+                    for some reads. Needs --ram (at least ${DISK_RAM_MIN_GB} GB) and the model downloaded here.
+                    Default (pooled join): on with a discrete GPU and the RAM for it; the room reads
+                    from disk only a model whose files are all on this computer. --no-disk: never
+  --pull            download the host's model whole before loading, whatever its size
   --no-pull         don't download the model: stream this device's layers from Hugging Face
+  --dry-run         print what pooled join would lend (and, per model, whether it would download or
+                    stream it and read experts from disk), then exit. Joins nothing; no GPU work
   --no-check        skip the test allocation that confirms the memory is there
   --wait <min>      after the host has been gone a minute, keep trying to rejoin for this long
                     (default 10); only a host of the same name: a room code can be reused by a
@@ -155,19 +169,61 @@ export function parseRam(v) {
 export function ramRule(mem, want, { totalGB = 0, freeGB = 0 } = {}) {
   if (mem?.kind !== "discrete") return { gb: 0, why: mem?.kind === "unified" ? "unified memory: no expert offload" : "no expert offload (the GPU's memory is unknown)" };
   if (want) return { gb: Math.floor(want.gb), why: `--ram ${want.gb}` };
-  const gb = Math.max(0, Math.floor(Math.min(totalGB - RAM_KEEP_GB, freeGB - RAM_FREE_SLACK_GB, DESK_MAX_GB)));
-  return { gb, why: `${fmtGb(totalGB)} GB of RAM, less ${RAM_KEEP_GB} GB kept for the system` + (freeGB - RAM_FREE_SLACK_GB < totalGB - RAM_KEEP_GB ? `; ${fmtGb(freeGB)} GB is free right now` : "") };
+  const keep = Math.max(RAM_KEEP_GB, Math.round(totalGB * RAM_KEEP_FRAC));
+  const gb = Math.max(0, Math.floor(Math.min(totalGB - keep, freeGB - RAM_FREE_SLACK_GB, DESK_MAX_GB)));
+  return { gb, keepGB: keep, totalGB, freeLimited: freeGB - RAM_FREE_SLACK_GB < totalGB - keep, why: `${fmtGb(totalGB)} GB of RAM, less ${keep} GB kept for the system` + (freeGB - RAM_FREE_SLACK_GB < totalGB - keep ? `; ${fmtGb(freeGB)} GB is free right now` : "") };
 }
 
 // --disk: expert offload's disk tier (room/plan.js DISK_RAM_MIN, engine/expert_t1.js): only where offload is (a
 // discrete GPU with RAM for experts: ramRule's gb). On unified memory the GPU's memory is the system's, and a disk
 // tier there is a later step (roadmap/32 step 8). want: --disk given; ram: ramRule's answer. -> { on, why }
+// want: true (--disk), false (--no-disk, or not given on pooled host), null (pooled join, not given: auto). Auto turns it
+// on wherever --disk would be (a discrete GPU, at least DISK_RAM_MIN_GB of RAM for experts) and says nothing when it
+// can't: the room reads experts from disk only for a model whose files are all on this computer (room/pledge.js
+// diskFor: meta.local), and only when nothing else holds it, so offering it changes nothing in a room that fits.
 export function diskRule(mem, want, ram) {
-  if (!want) return { on: false, why: "" };
-  if (mem?.kind === "unified") return { on: false, why: "--disk: not on unified memory yet (the GPU's memory is the system's RAM)" };
-  if (!(ram?.gb > 0)) return { on: false, why: `--disk needs RAM for expert offload (${ram?.why || "--ram 0"})` };
-  if (ram.gb < DISK_RAM_MIN_GB) return { on: false, why: `--disk needs at least ${DISK_RAM_MIN_GB} GB of --ram for its cache` };
-  return { on: true, why: "--disk" };
+  if (want === false || want === undefined) return { on: false, why: "" };
+  const auto = want == null;
+  if (mem?.kind === "unified") return { on: false, auto, why: auto ? "" : "--disk: not on unified memory yet (the GPU's memory is the system's RAM)" };
+  if (!(ram?.gb > 0)) return { on: false, auto, why: auto ? "" : `--disk needs RAM for expert offload (${ram?.why || "--ram 0"})` };
+  if (ram.gb < DISK_RAM_MIN_GB) return { on: false, auto, why: auto ? "" : `--disk needs at least ${DISK_RAM_MIN_GB} GB of --ram for its cache` };
+  return { on: true, auto, why: auto ? "auto" : "--disk" };
+}
+
+// pooled join: download the host's model whole before loading, or stream this device's layers? (the room node's
+// beforeLoad waits for a download, so a long one holds the room's load). st: cache.js modelState; bytes: the model's
+// files; freeBytes: free space where models live (null: unknown). pull: --pull; noPull: --no-pull. -> { pull, why }
+export function pullPlan({ st, bytes, freeBytes = null, pull = false, noPull = false, key = "" }) {
+  const G = 1e9;   // (file and disk sizes in GB as the OS and Hugging Face show them: 100.6 GB for Flash)
+  if (st?.pulled) return { pull: false, local: true, why: "on this computer" };
+  if (noPull) return { pull: false, why: "--no-pull" };
+  const need = Math.max(0, (bytes || 0) - (st?.partBytes || 0));
+  if (freeBytes != null && freeBytes - need < DISK_KEEP_GB * G)
+    return { pull: false, why: `${fmtGb(freeBytes / G)} GB free on disk, and downloading it (${fmtGb(need / G)} GB) would leave less than ${DISK_KEEP_GB} GB` };
+  if (!pull && bytes > AUTO_PULL_MAX_GB * G) return { pull: false, why: `${fmtGb(bytes / G)} GB is too big to download before loading; pooled pull ${key || "<model>"} keeps it here` };
+  return { pull: true, why: pull ? "--pull" : `${fmtGb(need / G)} GB to download` };
+}
+
+// The one line pooled join prints: what it lends and why, in plain words. rule: memoryRule; ram: ramRule; disk:
+// diskRule; mem: detectMemory; model (when the host's model is known): { label, plan: pullPlan, moe }
+//   "Lending 9.5 GB of GPU memory (11.4 GB free, 1.5 GB kept free) and 43 GB of RAM (64 GB, 16 GB kept for the system);
+//    reading experts from the model files on this computer when RAM runs short. Change with --gb / --ram / --disk."
+export function autoLine({ rule, ram, disk, mem, model = null }) {
+  const gbWhy = rule.why.startsWith("--gb") ? "--gb" : mem?.kind === "discrete" ? `${fmtGb(mem.freeGB)} GB free, ${rule.why.includes(" less 0.5 ") ? 0.5 : DISCRETE_RESERVE_GB} GB kept free`
+    : mem?.kind === "unified" ? `of ${fmtGb(mem.totalGB)} GB, the rest kept for the system` : "its memory can't be read";
+  let s = `Lending ${fmtGb(rule.gb)} GB of ${mem?.kind === "unified" ? "unified memory" : "GPU memory"} (${gbWhy})`;
+  const moe = !model || model.moe;
+  if (ram?.gb > 0 && moe) s += ` and ${ram.gb} GB of RAM for experts (${ram.why.startsWith("--ram") ? "--ram"
+    : ram.freeLimited ? `what is free now, less ${RAM_FREE_SLACK_GB} GB` : `of ${fmtGb(ram.totalGB)} GB, ${ram.keepGB} GB kept for the system`})`;
+  const parts = [];
+  if (model?.plan) {
+    const p = model.plan;
+    if (p.local) parts.push(disk?.on && moe && ram?.gb > 0 ? "reading from the model files on this computer (experts too, if RAM runs short)" : "loading from the model files on this computer");
+    else if (p.pull) parts.push(`downloading ${model.label} first (${p.why}), then loading from disk`);
+    else parts.push(`streaming this computer's layers of ${model.label} from Hugging Face (${p.why})`);
+  } else if (disk?.on) parts.push("experts can be read from model files on this computer if RAM runs short");
+  const flags = mem?.kind === "discrete" ? ["--gb", "--ram", disk?.on ? "--no-disk" : "--disk"] : ["--gb"];
+  return `${s}${parts.length ? "; " + parts.join("; ") : ""}. Change with ${flags.join(" / ")}.`;
 }
 
 // --gb: a positive number of GB, or "max" -> { gb } | { max: true } | null (not given)
@@ -183,7 +239,7 @@ export function parseGb(v) {
 const COMMON = {
   gb: { type: "string" }, ram: { type: "string" }, name: { type: "string" }, signal: { type: "string" }, models: { type: "string" },
   "no-check": { type: "boolean" }, "json-log": { type: "boolean" }, quiet: { type: "boolean" }, verbose: { type: "boolean" },
-  "no-pull": { type: "boolean" }, disk: { type: "boolean" }, help: { type: "boolean", short: "h" },
+  "no-pull": { type: "boolean" }, disk: { type: "boolean" }, "no-disk": { type: "boolean" }, help: { type: "boolean", short: "h" },
 };
 const HOST_OPTS = { model: { type: "string" }, devices: { type: "string" }, wait: { type: "string" }, code: { type: "string" }, ctx: { type: "string" },
   "allow-all": { type: "boolean" }, "deny-unknown": { type: "boolean" }, start: { type: "boolean" }, chat: { type: "boolean" }, split: { type: "string" },
@@ -193,7 +249,7 @@ const HOST_OPTS = { model: { type: "string" }, devices: { type: "string" }, wait
 // checking --model; left out, any key passes (the runner checks it again)
 export function parseLendArgs(cmd, argv, { models = null } = {}) {
   const options = cmd === "join"
-    ? { ...COMMON, wait: { type: "string" } }
+    ? { ...COMMON, wait: { type: "string" }, pull: { type: "boolean" }, "dry-run": { type: "boolean" } }
     : { ...COMMON, ...HOST_OPTS };
   let r;
   try { r = parseArgs({ args: argv, options, allowPositionals: true, strict: true }); }
@@ -201,13 +257,18 @@ export function parseLendArgs(cmd, argv, { models = null } = {}) {
   const o = r.values, pos = r.positionals;
   if (o.help) return { cmd, help: true };
   const out = { cmd, gb: parseGb(o.gb), ram: parseRam(o.ram), name: o.name ? cleanText(o.name, 40) : undefined, signal: o.signal || null,
-    modelDir: o.models || null, check: !o["no-check"], jsonLog: !!o["json-log"], quiet: !!o.quiet, verbose: !!o.verbose, noPull: !!o["no-pull"], disk: !!o.disk };
+    modelDir: o.models || null, check: !o["no-check"], jsonLog: !!o["json-log"], quiet: !!o.quiet, verbose: !!o.verbose, noPull: !!o["no-pull"],
+    // --disk: on; --no-disk: off; neither: pooled join decides (diskRule auto), pooled host keeps it off
+    disk: o.disk ? true : o["no-disk"] ? false : cmd === "join" ? null : false };
+  if (o.disk && o["no-disk"]) throw new UsageError("--disk and --no-disk say opposite things: pick one");
   if (o.name != null && !out.name) throw new UsageError("--name must not be empty");
   if (cmd === "join") {
     if (pos.length > 1) throw new UsageError(`one room code, not ${pos.length}: ${pos.join(" ")}`);
     const code = roomCodeFrom(pos[0]);
     // no code at all: a terminal asks for it (lendrun), a script gets this same error there
-    if (!pos.length) { out.code = null; out.key = null; out.askCode = true; }
+    out.dryRun = !!o["dry-run"]; out.pull = !!o.pull;
+    if (out.pull && out.noPull) throw new UsageError("--pull and --no-pull say opposite things: pick one");
+    if (!pos.length) { out.code = null; out.key = null; out.askCode = !out.dryRun; }
     else if (!code) throw Object.assign(new UsageError(notARoom("join", pos[0]).replace(/^pooled join: /, "")), { lines: [notARoom("join", pos[0])] });
     if (pos.length) {
       out.code = code;
@@ -332,7 +393,9 @@ const floorGb = (x) => Math.floor(x * 2) / 2;   // half GB steps
 // room/pledge.js maxPledgeGB(model) when the model is known (64 GB, 128 for Qwen3.8-Flash-Next), else LEND_MAX_GB
 // (pooled join: the host counts at most its model's cap). -> { gb, why, low, over }
 //   low: less than 1 GB is free (not enough to lend); over: --gb asks for more than looks free
-export function memoryRule(mem, want = null, { maxBufGB = 0, capGB = LEND_MAX_GB } = {}) {
+// autoCapGB: the most the rule itself lends (no --gb): DESK_MAX_GB; pooled join passes LEND_MAX_GB, since its host counts
+// at most room/pledge.js maxPledgeGB(model) of it (64 GB, 128 for Qwen3.8-Flash-Next) and the model is not known yet
+export function memoryRule(mem, want = null, { maxBufGB = 0, capGB = LEND_MAX_GB, autoCapGB = DESK_MAX_GB } = {}) {
   let avail = null, why;
   if (mem.kind === "discrete") {
     const keep = want?.max ? 0.5 : DISCRETE_RESERVE_GB;
@@ -357,7 +420,7 @@ export function memoryRule(mem, want = null, { maxBufGB = 0, capGB = LEND_MAX_GB
   }
   if (avail < 1) return { gb: 0, why, low: true, over: false };
   let gb = floorGb(avail);
-  const cap = want?.max ? Math.min(capGB, LEND_MAX_GB) : DESK_MAX_GB;   // --gb max (and --here's "the most it can"): Flash past the default cap
+  const cap = want?.max ? Math.min(capGB, LEND_MAX_GB) : Math.min(autoCapGB, LEND_MAX_GB);   // --gb max (and --here's "the most it can"): Flash past the default cap
   if (gb > cap) { gb = cap; why += `, capped at ${cap} GB per device`; }
   return { gb, why, low: false, over: false };
 }

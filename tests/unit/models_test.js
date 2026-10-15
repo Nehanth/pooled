@@ -1,22 +1,37 @@
 // Model catalogue, loading flags, and shared context/memory policy from room/models.js.
-import { MODELS, NEED_GB, PICKER, CTX, MAX_SEQ, MAX_SEQ_LONG, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, kvBytesPerLayerPos, kvLayerBufBytes, ctxForBinding, WEBGPU_MIN_BIND, kvModeFor, kvForLoad, KV_MODES, NEED_MIN_GB, ctxChoices, pickCtx, ctxK, ctxShortNote, needText, modelLoadOptions } from "../../room/models.js";
+import { MODELS, NEED_GB, PICKER, CTX, MAX_SEQ, MAX_SEQ_LONG, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, kvBytesPerLayerPos, kvLayerBufBytes, ctxForBinding, WEBGPU_MIN_BIND, kvModeFor, kvForLoad, KV_MODES, NEED_MIN_GB, ctxChoices, pickCtx, ctxK, ctxShortNote, needText, modelLoadOptions, SAVE_WORKERS } from "../../room/models.js";
 
 const eq = (a, b, m) => { const ja = JSON.stringify(a), jb = JSON.stringify(b); if (ja !== jb) throw new Error((m || "mismatch") + ": " + ja + " != " + jb); };
 const ok = (c, m) => { if (!c) throw new Error(m || "assertion failed"); };
 
 Deno.test("modelLoadOptions: browser flags keep defaults and prefetch parsing", () => {
   for (const [search, want] of [
-    ["", { wcache: true, wcacheVerify: false, prefetch: null }],
-    ["?wcache=0&wcacheverify=1&prefetch=0", { wcache: false, wcacheVerify: true, prefetch: 0 }],
-    ["?wcache=1&wcacheverify=0&prefetch=3", { wcache: true, wcacheVerify: false, prefetch: 3 }],
-    ["?wcache=&wcacheverify=&prefetch=", { wcache: true, wcacheVerify: false, prefetch: 0 }],
-    ["?wcache=false&wcacheverify=true&prefetch=bad", { wcache: true, wcacheVerify: false, prefetch: 0 }],
-    ["?prefetch=-3", { wcache: true, wcacheVerify: false, prefetch: 0 }],
-    ["?prefetch=2.9", { wcache: true, wcacheVerify: false, prefetch: 2 }],
-    ["?prefetch=2tails", { wcache: true, wcacheVerify: false, prefetch: 2 }],
-    ["?prefetch=0x10", { wcache: true, wcacheVerify: false, prefetch: 0 }],
-    ["?prefetch=1&prefetch=4", { wcache: true, wcacheVerify: false, prefetch: 1 }],
-  ]) eq(modelLoadOptions(search), want, search);
+    ["", { wcache: true, wcacheVerify: false, prefetch: null, parload: true, ngramWorker: true }],
+    ["?wcache=0&wcacheverify=1&prefetch=0", { wcache: false, wcacheVerify: true, prefetch: 0, parload: true, ngramWorker: true }],
+    ["?wcache=1&wcacheverify=0&prefetch=3", { wcache: true, wcacheVerify: false, prefetch: 3, parload: true, ngramWorker: true }],
+    ["?wcache=&wcacheverify=&prefetch=", { wcache: true, wcacheVerify: false, prefetch: 0, parload: true, ngramWorker: true }],
+    ["?wcache=false&wcacheverify=true&prefetch=bad", { wcache: true, wcacheVerify: false, prefetch: 0, parload: true, ngramWorker: true }],
+    ["?prefetch=-3", { wcache: true, wcacheVerify: false, prefetch: 0, parload: true, ngramWorker: true }],
+    ["?prefetch=2.9", { wcache: true, wcacheVerify: false, prefetch: 2, parload: true, ngramWorker: true }],
+    ["?prefetch=2tails", { wcache: true, wcacheVerify: false, prefetch: 2, parload: true, ngramWorker: true }],
+    ["?prefetch=0x10", { wcache: true, wcacheVerify: false, prefetch: 0, parload: true, ngramWorker: true }],
+    ["?prefetch=1&prefetch=4", { wcache: true, wcacheVerify: false, prefetch: 1, parload: true, ngramWorker: true }],
+    ["?parload=0", { wcache: true, wcacheVerify: false, prefetch: null, parload: false, ngramWorker: true }],
+    ["?ngramworker=0&parload=1", { wcache: true, wcacheVerify: false, prefetch: null, parload: true, ngramWorker: false }],
+  ]) {
+    const { wcache, wcacheVerify, prefetch, parload, ngramWorker } = modelLoadOptions(search);
+    eq({ wcache, wcacheVerify, prefetch, parload, ngramWorker }, want, search);
+  }
+});
+
+Deno.test("modelLoadOptions: the experts' first save flags", () => {
+  const o = modelLoadOptions("");
+  eq(o.save, { workers: SAVE_WORKERS, chunk: 8, ahead: 3, early: true }, "defaults");
+  eq(o.cdnResolve, true, "the CDN URL is used by default");
+  const p = modelLoadOptions("?saveworkers=0&savechunk=16&saveahead=2&saveearly=0&cdnresolve=0");
+  eq(p.save, { workers: 0, chunk: 16, ahead: 2, early: false }, "flags");
+  eq(p.cdnResolve, false, "cdnresolve=0");
+  eq(modelLoadOptions("?saveworkers=999&savechunk=0&saveahead=x").save, { workers: 64, chunk: 1, ahead: 3, early: true }, "clamped / bad values");
 });
 
 Deno.test("maxSeqFor: table of models and ?ctx= asks", () => {
@@ -211,8 +226,8 @@ Deno.test("kvForLoad: the host's kv wins over a worker's own ?kv=, so every devi
 Deno.test("room.js: the host sends its KV format with ai-load and workers build with it", () => {
   const src = Deno.readTextFileSync(new URL("../../room.js", import.meta.url));
   ok(/t: "ai-load",[^\n]*\bkv: ROOM_KV\b/.test(src), "ai-load carries kv: ROOM_KV");
-  ok(/aiLoadShard\(modelKey, ranges\[0\], true, true, ROOM_CTX, ROOM_KV\)/.test(src), "the host builds with ROOM_KV");
-  ok(/aiLoadShard\([^\n]*kvForLoad\(d\.model, d\.kv, KV_ASK\)\)/.test(src), "workers build with the host's kv");
+  ok(/aiLoadShard\(modelKey, ranges\[0\], true, true, ROOM_CTX, ROOM_KV[,)]/.test(src), "the host builds with ROOM_KV");
+  ok(/aiLoadShard\([^\n]*kvForLoad\(d\.model, d\.kv, KV_ASK\)[,)]/.test(src), "workers build with the host's kv");
   ok(/\* kvBytesPerLayerPos\(ai\.G\.meta, ROOM_KV\)/.test(src), "the layer deal counts the room's KV bytes");
 });
 

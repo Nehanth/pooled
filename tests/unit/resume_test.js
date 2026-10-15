@@ -127,6 +127,16 @@ Deno.test("resume: link and away helpers", () => {
   ok(!sameShard(null, { model: "m", range: [4, 8] }));
 });
 
+Deno.test("resume: a Flash engine is kept only for the same format (ai-load.flash: QSA or dense)", () => {
+  const base = { model: "qwen3.8-flash", range: [24, 48], ctx: 2048 }, qsa = { qsa: 1, kv: "f32", ring: 1024 };
+  ok(sameShard({ ...base, flash: null }, base), "dense held, dense asked (no field: an older host)");
+  ok(sameShard({ ...base, flash: qsa }, { ...base, flash: { ...qsa } }));
+  ok(!sameShard({ ...base, flash: null }, { ...base, flash: qsa }), "a dense engine is not kept for a QSA room");
+  ok(!sameShard({ ...base, flash: qsa }, base), "nor a QSA engine for a dense one");
+  ok(!sameShard({ ...base, flash: qsa }, { ...base, flash: { ...qsa, ring: 2048 } }));
+  ok(!sameShard({ ...base, flash: qsa }, { ...base, flash: { ...qsa, kv: "f16" } }));
+});
+
 Deno.test("resume: a reloaded guest tab walks back into its room", () => {
   const now = 1e12;
   eq(guestResume({ code: "ABCD", name: "otter", gb: 0.5, t: now - 1000 }, { now }), { code: "ABCD", name: "otter", gb: 0.5 });

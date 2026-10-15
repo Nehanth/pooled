@@ -1,6 +1,6 @@
 // room/speedo.js: the speed panel's numbers and words (no DOM, times passed in).
 import { fmtTps, parseStats, SpeedMeter, pushHistory, speedup, gainText, barScale, paramsOf, paramsText, expertsAt, expertsText,
-  expertsHead, expertsCost, tokenShares, pushEvent, onlineText, fmtGB } from "../../room/speedo.js";
+  expertsHead, expertsCost, tokenShares, pushEvent, onlineText, fmtGB, wordsPerSec, speedWords, speedLine, bandLine, warmupAnswers } from "../../room/speedo.js";
 import { MODELS } from "../../room/models.js";
 import { expertCache } from "../../room/tele.js";
 
@@ -54,20 +54,41 @@ Deno.test("pushHistory: newest last, capped, one entry per answer key, none with
   eq(h.length, 16); eq(h[15].key, "k29");
 });
 
-Deno.test("speedup: the newest run of answers against the run before, by device count", () => {
-  const H = (...xs) => xs.map(([tps, devices], i) => ({ key: i, tps, devices }));
+Deno.test("speedup: steady answers on this device count against the best recent steady ones on the other", () => {
+  const H = (...xs) => xs.map(([tps, devices, warm = false], i) => ({ key: i, tps, devices, warm }));
+  eq(speedup([]), null);
   eq(speedup(H([5, 1])), null);
-  eq(speedup(H([5, 1], [6, 1])), null, "one run");
+  eq(speedup(H([5, 1], [6, 1])), null, "one count only");
   const g = speedup(H([5, 1], [7, 1], [6, 1], [13, 2], [11, 2]));
-  eq([g.from, g.to], [1, 2]); near(g.x, 12 / 6, "medians");
-  // only the run right before counts (a third device after two)
+  eq([g.from, g.to], [1, 2]); near(g.x, 12 / 6, "medians of the best");
+  // the count before the newest: a third device after two
   const g3 = speedup(H([5, 1], [12, 2], [12, 2], [18, 3]));
   eq([g3.from, g3.to], [2, 3]); near(g3.x, 1.5);
   eq(gainText(g), "2.0× faster than on 1 device");
   eq(gainText({ x: 12.4, from: 1, to: 2 }), "12× faster than on 1 device");
   eq(gainText({ x: 0.75, from: 2, to: 1 }), "25% slower than on 2 devices");
   eq(gainText({ x: 1.02, from: 2, to: 3 }), "about as fast as on 2 devices");
+  eq(gainText({ x: 0.91, from: 1, to: 2 }), "about as fast as on 1 device", "within 10%: answers vary that much");
   eq(gainText(null), "");
+});
+Deno.test("speedup: the Flash demo (2026-10-13): no '9% slower' right after the re-deal, then 1.7×", () => {
+  // Mac alone q1 7.6 (the first answer after its load: warm), a steady one at 7.4; the PC added: q2 6.9 (warm), q3 11.0
+  // (warm: the second on two devices), q4 12.5, q5 6.7 (a slow one), 11.6
+  const h = [], add = (tps, devices, warm) => h.push({ key: h.length, tps, devices, warm, model: "qwen3.8-flash" });
+  add(7.6, 1, true); eq(speedup(h), null);
+  add(7.4, 1, false); eq(speedup(h), null);
+  add(6.9, 2, true); eq(speedup(h), null, "the first answer on 2 devices is a warm-up: nothing said");
+  add(11.0, 2, true); eq(speedup(h), null, "and the second");
+  add(12.5, 2, false); near(speedup(h).x, 12.5 / 7.4); eq(gainText(speedup(h)), "1.7× faster than on 1 device");
+  add(6.7, 2, false); near(speedup(h).x, (12.5 + 6.7) / 2 / 7.4, "a slow answer: the median of the two");
+  add(11.6, 2, false); near(speedup(h).x, 11.6 / 7.4, "the best three of the newest five");
+  // with only warm answers alone the comparison stays hidden (better nothing than a misleading figure)
+  eq(speedup(h.map((x) => (x.devices === 1 ? { ...x, warm: true } : x))), null);
+  // another model's answers are not compared
+  eq(speedup([{ key: 0, tps: 7, devices: 1, model: "a" }, { key: 1, tps: 12, devices: 2, model: "b" }]), null);
+});
+Deno.test("warmupAnswers: one on one device, two on several", () => {
+  eq(warmupAnswers(1), 1); eq(warmupAnswers(2), 2); eq(warmupAnswers(5), 2); eq(warmupAnswers(0), 1);
 });
 
 Deno.test("barScale: heights against the fastest, a sliver at least", () => {
@@ -143,13 +164,44 @@ Deno.test("pushEvent: newest last, capped, a repeat is one event", () => {
   ev = pushEvent(ev, onlineText(1), 1);
   ev = pushEvent(ev, "pc joined", 2);
   ev = pushEvent(ev, "pc joined", 3);
-  eq(ev, [{ text: "online · 1 device", at: 1 }, { text: "pc joined", at: 3 }]);
+  eq(ev, [{ text: "Running on 1 device", at: 1 }, { text: "pc joined", at: 3 }]);
   ev = pushEvent(ev, "", 4);
   eq(ev.length, 2);
   for (const t of ["re-dealing layers", onlineText(2), "phone joined", "phone asks only"]) ev = pushEvent(ev, t, 5);
-  eq(ev.map((e) => e.text), ["re-dealing layers", "online · 2 devices", "phone joined", "phone asks only"]);
+  eq(ev.map((e) => e.text), ["re-dealing layers", "Running on 2 devices", "phone joined", "phone asks only"]);
 });
 
 Deno.test("fmtGB: one decimal under 10 GB, never 0 GB", () => {
   eq([fmtGB(0.01), fmtGB(0.43), fmtGB(7.25), fmtGB(12.6)], ["<0.1 GB", "0.4 GB", "7.3 GB", "13 GB"]);
+});
+
+Deno.test("the speed in words: about 0.75 words a token, a plain line live and after an answer, nothing without a speed", () => {
+  eq(wordsPerSec(4), 3); eq(wordsPerSec(0), 0); eq(wordsPerSec(NaN), 0); eq(wordsPerSec(-1), 0); eq(wordsPerSec(Infinity), 0);
+  eq(speedWords(4), "about 3 words a second");
+  eq(speedWords(1.4), "about 1 word a second");
+  eq(speedWords(0.5), "less than a word a second");
+  eq(speedWords(0), "");
+  eq(speedLine(4, { live: true }), "Writing about 3 words a second");
+  eq(speedLine(21.4, { devices: 3 }), "Last answer: about 16 words a second on 3 devices");
+  eq(speedLine(4, { devices: 1 }), "Last answer: about 3 words a second on 1 device");
+  eq(speedLine(4), "Last answer: about 3 words a second");
+  eq(speedLine(0, { live: true }), "", "no dash: nothing until the rate settles");
+  for (const t of [speedLine(4, { live: true }), speedLine(30, { devices: 2 }), onlineText(2)]) if (/tok|ms\b/.test(t)) throw new Error(t);
+});
+
+Deno.test("bandLine: the band head's one line, only after a real answer (two tokens or more)", () => {
+  eq(bandLine(null), "");
+  eq(bandLine(undefined), "");
+  eq(bandLine({ tps: 0, devices: 1 }), "");
+  eq(bandLine({ tps: 4, devices: 1 }), "Last answer: about 3 words a second");
+  eq(bandLine({ tps: 4, devices: 2 }), "Last answer: about 3 words a second on 2 devices");
+  eq(bandLine({ tps: 0.5, devices: 1 }), "Last answer: less than a word a second");
+  // a one-token answer ("Paris") gives no history and no last answer: the line stays empty
+  let hist = [], last = null;
+  const st = parseStats("1 tok · 0.0 tok/s · 1 device");
+  if (st && st.count >= 2) { hist = pushHistory(hist, { key: "a", tps: st.tps, devices: st.devices }); last = st; }
+  eq(hist.length, 0);
+  eq(bandLine(last), "");
+  // never a live line, never a number in tok/s
+  for (const t of [bandLine({ tps: 40, devices: 3 }), bandLine({ tps: 4, devices: 1 })]) if (/tok|Writing/.test(t)) throw new Error(t);
 });

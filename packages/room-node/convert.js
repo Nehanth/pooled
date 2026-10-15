@@ -46,11 +46,35 @@ export function convertPool({ threads = Math.max(1, Math.min(8, (os.availablePar
     }
     return { kind: "q8", qs, scales, shape: info.shape };
   }
+  // Q4_0 / Q8_0 repack across the threads, for a tensor whose bytes are in shared memory (fastload.js): the result's
+  // qs and scales are views of `out` ({ qs: SharedArrayBuffer, sc: SharedArrayBuffer }, at least n / 2 or n bytes and
+  // two bytes a block), the same bytes convertEntry gives. -> the entry, or null when the pool can't (convert inline)
+  async function repackShared(info, bytes, out) {
+    const T = info.ggmlType, n = info.nElems ?? info.shape.reduce((a, b) => a * b, 1), nb = n / 32;
+    if (broken || threads < 2 || (T !== GGML_Q4_0 && T !== GGML_Q8_0) || info.shape.length !== 2 || nb % 1
+      || !(bytes.buffer instanceof SharedArrayBuffer) || bytes.byteOffset !== 0) return null;
+    try {
+      if (!workers) await start();
+      const per = Math.ceil(nb / workers.length / 2) * 2;   // whole u32 words of scales per thread
+      const jobs = [];
+      for (let b0 = 0, k = 0; b0 < nb; b0 += per, k++)
+        jobs.push(run(workers[k], { ggmlType: T, repack: { src: bytes.buffer, qs: out.qs, sc: out.sc, b0, b1: Math.min(nb, b0 + per) } }, []));
+      await Promise.all(jobs);
+    } catch (e) { broken = true; log(`weight conversion pool unavailable (${String(e?.message || e).split("\n")[0]}): converting on the main thread`); return null; }
+    const qsB = T === GGML_Q4_0 ? n / 2 : n;
+    return { kind: T === GGML_Q4_0 ? "q4" : "q8", qs: new Uint8Array(out.qs, 0, qsB), scales: new Uint32Array(out.sc, 0, Math.ceil(nb / 2)), shape: info.shape };
+  }
   return {
+    repackShared,
+    get threads() { return threads; },
+    // a tensor convert() requantizes (not Q4_0 / Q8_0 / floats): what fastload.js converts ahead on the threads
+    requantizes: (info) => !inline(info.ggmlType) && info.shape.length === 2 && ggmlTypeBytes(info.ggmlType, info.shape[1]) >= 0,
     // (info, bytes) -> the entry convertEntry(info, bytes) returns
-    async convert(info, bytes) {
+    // any: on the threads whatever the tensor's size (fastload.js converts ahead of the loader: off the event loop
+    // even a 1 MB Q5_0 tensor's 45 ms is worth it)
+    async convert(info, bytes, { any = false } = {}) {
       const T = info.ggmlType;
-      if (broken || info.shape.length !== 2 || inline(T) || info.byteLength < minBytes || threads < 2 || ggmlTypeBytes(T, info.shape[1]) < 0) return convertEntry(info, bytes);
+      if (broken || info.shape.length !== 2 || inline(T) || (info.byteLength < minBytes && !any) || threads < 2 || ggmlTypeBytes(T, info.shape[1]) < 0) return convertEntry(info, bytes);
       try { return await requant(info, bytes); }
       catch (e) { broken = true; log(`weight conversion pool unavailable (${String(e?.message || e).split("\n")[0]}): converting on the main thread`); return convertEntry(info, bytes); }
     },

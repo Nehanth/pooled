@@ -5,6 +5,7 @@
 //   deno run --unstable-webgpu --allow-read tests/test_q38flash_mc.js
 import * as W from "../engine/wgsl/qwen4exp.js";
 import * as M from "../engine/wgsl/qwen4exp_batch.js";
+import { f16bits } from "./reference/qsa_ref.mjs";
 
 const ad = await navigator.gpu.requestAdapter();
 const device = await ad.requestDevice({ requiredLimits: { maxStorageBufferBindingSize: ad.limits.maxStorageBufferBindingSize, maxBufferSize: ad.limits.maxBufferSize,
@@ -185,15 +186,19 @@ for (const kind of ["q4", "q8"]) {
     && same(await read(D.S, nV * dS * dS), await read(Mc.S, nV * dS * dS)) === 0, `dn_delta_mc (delta rule + gated norm): ${N} columns == decode, S too`);
 }
 
-// ---- attention: prep (rope per column) + dense, and gathered over the full list, after 20 decode steps
-{
-  const nH = 4, nKV = 2, hd = 256, nRot = 64, maxSeq = 64, pre = 20, N = 7, eps = 1e-6, theta = 1e7;
-  const nQ = 2 * nH * hd, nK = nKV * hd, qs = nQ + 2 * nK;
+// ---- attention: prep (rope per column) + dense, and gathered over the full list, after 20 decode steps; per KV
+// format. f16: the cache words are the f32 run's values rounded to nearest even (f16bits), and the outputs stay
+// within f16 rounding of the f32 run's.
+const attnRuns = {};
+for (const kv of ["f32", "f16"]) {
+  const nH = 4, nKV = 2, hd = 256, nRot = 64, maxSeq = 64, pre = 20, N = 7, eps = 1e-6, theta = 1e7, kb = kv === "f16" ? 2 : 4;
+  const nQ = 2 * nH * hd, nK = nKV * hd, qs = nQ + 2 * nK, nw = (n) => n * kb / 4;   // cache words of n values
   const ts = Math.fround(Math.pow(theta, -2 / nRot));
   const csOf = (p) => { const F = new Float32Array(64 * 4); let th = Math.fround(p); for (let i = 0; i < nRot / 2; i++) { F[i * 4] = Math.fround(Math.cos(th)); F[i * 4 + 1] = Math.fround(Math.sin(th)); th = Math.fround(th * ts); } return F; };
+  seed = 20261012;   // the same data for both formats
   const qkv = put(randF((pre + N) * qs, 2)), qw = put(randF(hd, 2)), kw = put(randF(hd, 2));
   const ap = uni([nH, nKV, hd, nRot, f(eps), 0, 0, 0]);
-  const kcD = mk(maxSeq * nK * 4), vcD = mk(maxSeq * nK * 4), kcM = mk(maxSeq * nK * 4), vcM = mk(maxSeq * nK * 4);
+  const kcD = mk(maxSeq * nK * kb), vcD = mk(maxSeq * nK * kb), kcM = mk(maxSeq * nK * kb), vcM = mk(maxSeq * nK * kb);
   const q1 = mk(nQ * 4), k1 = mk(nK * 4), v1 = mk(nK * 4), qn1 = mk(nH * hd * 4), ao1 = mk(nH * hd * 4);
   const frame = device.createBuffer({ size: W.FRAME_FLOATS * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const aoD = mk(N * nH * hd * 4);
@@ -202,8 +207,8 @@ for (const kind of ["q4", "q8"]) {
     new Uint32Array(Fr.buffer, 0, 2).set([p, p + 1]); Fr.set(csOf(p), 4);
     device.queue.writeBuffer(frame, 0, Fr);
     copy(qkv, p * qs, q1, 0, nQ); copy(qkv, p * qs + nQ, k1, 0, nK); copy(qkv, p * qs + nQ + nK, v1, 0, nK);
-    run(W.ATTN_PREP_WGSL, [q1, k1, v1, qn1, kc, vc, qw, kw, ap, frame], [nH + nKV, 1, 1]);
-    run(W.ATTN_DEC_WGSL, [qn1, kc, vc, q1, ao1, ap, frame], [nH, 1, 1]);
+    run(W.attnPrepWGSL(kv), [q1, k1, v1, qn1, kc, vc, qw, kw, ap, frame], [nH + nKV, 1, 1]);
+    run(W.attnDecWGSL(kv), [qn1, kc, vc, q1, ao1, ap, frame], [nH, 1, 1]);
     if (keep >= 0) copy(ao1, 0, aoD, keep * nH * hd, nH * hd);
   };
   for (let p = 0; p < pre + N; p++) step(kcD, vcD, p, p - pre);
@@ -211,15 +216,27 @@ for (const kind of ["q4", "q8"]) {
   const qkvs = mk(N * qs * 4); copy(qkv, pre * qs, qkvs, 0, N * qs);
   const cs = new Float32Array(N * M.MC_FRAME_COL); for (let c = 0; c < N; c++) cs.set(csOf(pre + c), c * M.MC_FRAME_COL);
   const csb = put(cs), F = uni([pre, N, 0, 0]), ms = uni([qs, nQ, nQ + nK, 0]), qn = mk(N * nH * hd * 4), ao = mk(N * nH * hd * 4), aoG = mk(N * nH * hd * 4);
-  run(M.ATTN_PREP_MC_WGSL, [qkvs, qn, kcM, vcM, qw, kw, csb, ap, ms, F], [nH + nKV, N, 1]);
-  run(M.attnDecMcWGSL(), [qn, kcM, vcM, qkvs, ao, ap, F, ms], [nH, N, 1]);
+  run(M.attnPrepMcWGSL(kv), [qkvs, qn, kcM, vcM, qw, kw, csb, ap, ms, F], [nH + nKV, N, 1]);
+  run(M.attnDecMcWGSL({ kv }), [qn, kcM, vcM, qkvs, ao, ap, F, ms], [nH, N, 1]);
   const STR = 2052, sel = new Uint32Array(N * STR); for (let c = 0; c < N; c++) { const p = pre + c; sel[c * STR] = p + 1; for (let r = 0; r <= p; r++) sel[c * STR + 1 + r] = r; }
-  run(M.attnDecMcWGSL({ gather: STR }), [qn, kcM, vcM, qkvs, aoG, ap, null, ms, put(sel)], [nH, N, 1]);
-  check(same(await read(kcD, (pre + N) * nK), await read(kcM, (pre + N) * nK)) === 0 && same(await read(vcD, (pre + N) * nK), await read(vcM, (pre + N) * nK)) === 0,
-    `attn_prep_mc: ${N} columns' K / V cache rows == decode`);
+  run(M.attnDecMcWGSL({ gather: STR, kv }), [qn, kcM, vcM, qkvs, aoG, ap, null, ms, put(sel)], [nH, N, 1]);
+  const kD = await read(kcD, nw((pre + N) * nK)), vD = await read(vcD, nw((pre + N) * nK));
+  check(same(kD, await read(kcM, nw((pre + N) * nK))) === 0 && same(vD, await read(vcM, nw((pre + N) * nK))) === 0,
+    `attn_prep_mc (${kv} KV): ${N} columns' K / V cache rows == decode`);
   const aD = await read(aoD, N * nH * hd);
-  check(same(aD, await read(ao, N * nH * hd)) === 0, `attn_dec_mc (dense): ${N} columns == decode`);
-  check(same(aD, await read(aoG, N * nH * hd)) === 0, `attn_dec_mc (gathered, the full row list) == dense`);
+  check(same(aD, await read(ao, N * nH * hd)) === 0, `attn_dec_mc (dense, ${kv} KV): ${N} columns == decode`);
+  check(same(aD, await read(aoG, N * nH * hd)) === 0, `attn_dec_mc (gathered, the full row list, ${kv} KV) == dense`);
+  attnRuns[kv] = { kD, vD, aD };
+}
+{
+  const a = attnRuns.f32, b = attnRuns.f16;
+  const half = (w, i) => (w[i >> 1] >>> ((i & 1) * 16)) & 0xffff, f32 = (u) => new Float32Array(u.buffer, u.byteOffset, u.length);
+  let off = 0;
+  for (const [x, y] of [[a.kD, b.kD], [a.vD, b.vD]]) { const xf = f32(x); for (let i = 0; i < xf.length; i++) if (half(y, i) !== f16bits(xf[i])) off++; }
+  check(off === 0, `f16 KV store: every K / V value == the f32 run's rounded to nearest even (${off} differ)`);
+  const xf = f32(a.aD), yf = f32(b.aD);
+  let md = 0, mx = 0; for (let i = 0; i < xf.length; i++) { md = Math.max(md, Math.abs(xf[i] - yf[i])); mx = Math.max(mx, Math.abs(xf[i])); }
+  check(md / mx < 2e-3, `f16 KV attention output vs f32: max rel ${(md / mx).toExponential(2)} (< 2e-3)`);
 }
 
 // ---- PLE: 13 columns from position 5 (ring of 10 slots: a pass longer than the ring) == 18 decode steps

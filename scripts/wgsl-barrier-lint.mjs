@@ -455,6 +455,20 @@ export async function generatedSources() {
   const out = [];
   for (const WG of [64, 128, 256]) for (const ROWS of [4, 8]) for (const unpack of [true, false])
     out.push({ file: `coop.js (generated: coopWGSL(${WG}, ${ROWS}, unpack ${unpack}, CV, NRM))`, js: "export const W = `" + coopWGSL(WG, ROWS, 64, 16, 1, unpack, true, true) + "`;" });
+  // Qwen3.8-Flash-Next's K / V format variants: the f16 store's barrier lives in a helper template (kvStoreRow) with no
+  // fn of its own, so only the generated kernels show it inside its fn; and QSA's raw-key ring kernels
+  const q = await import(new URL("../engine/wgsl/qwen4exp.js", import.meta.url).href);
+  const qb = await import(new URL("../engine/wgsl/qwen4exp_batch.js", import.meta.url).href);
+  const { qsaWGSL, QSA_SEL_STRIDE } = await import(new URL("../engine/wgsl/qsa.js", import.meta.url).href);
+  const gen = (file, code) => out.push({ file: `${file} (generated)`, js: "export const W = `" + code + "`;" });
+  for (const kv of ["f32", "f16"]) {
+    gen(`qwen4exp.js attnPrepWGSL("${kv}")`, q.attnPrepWGSL(kv));
+    gen(`qwen4exp.js attnDecWGSL("${kv}")`, q.attnDecWGSL(kv));
+    gen(`qwen4exp_batch.js attnPrepMcWGSL("${kv}")`, qb.attnPrepMcWGSL(kv));
+    gen(`qwen4exp_batch.js attnDecMcWGSL({ kv: "${kv}" })`, qb.attnDecMcWGSL({ kv }));
+    gen(`qwen4exp_batch.js attnDecMcWGSL({ gather, kv: "${kv}" })`, qb.attnDecMcWGSL({ gather: QSA_SEL_STRIDE, kv }));
+  }
+  for (const rawRing of [0, 1024]) gen(`qsa.js qsaWGSL({ rawRing: ${rawRing} })`, qsaWGSL({ rawRing }));
   return out;
 }
 

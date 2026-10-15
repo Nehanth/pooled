@@ -299,17 +299,61 @@ export function opfsReadAt(syncHandles) {
   };
 }
 
+const PLAIN = { url: null, until: 0 };   // (httpReadAt: a file that answered without a redirect)
+
 // HTTP range requests. urls[file] is the file's URL (a split head file, or the GGUF shard for layout "tensor").
 // For a cold start only: 16 round trips a token is fine while the OPFS copy fills, not for steady decode.
 // A server that ignores Range answers 200 with the whole file (a split head file is 1.8 GB): that is refused before
 // the body is read, unless the request starts at 0 and Content-Length says the whole file is no bigger than asked.
 // A 206's Content-Range, when the response exposes it (cross-origin it needs Access-Control-Expose-Headers), must
 // start where we asked.
-export function httpReadAt(urls, { fetch: f = globalThis.fetch, headers = {} } = {}) {
-  return async (file, off, len) => {
+// (a call's optional 4th argument { signal } aborts its request: room/flashdisk.js ingestNgram stops the other heads' reads
+// on the first failure)
+//
+// resolve: true follows a file's redirect once and then asks its target directly. Hugging Face answers every
+// /resolve/ request with a 302 to a signed CDN URL (us.aws.cdn.hf.co/...?Expires=<s>&Signature=..., valid an hour):
+// a copy of 10,000 range requests paid that extra round trip (and a hit on the Hub's resolver) every time. The target
+// (Response.url, after the redirect) is kept until 5 min before its Expires (at most ttlMs); a request to it that
+// fails (an expired signature: 403; any other status or network error) forgets it and goes through the
+// original URL again, once. While a file's first request is out, the others wait for its answer (one redirect per
+// file, not one per request in flight). direct: a Map to share what was resolved between readers (a worker's jobs).
+// now: a clock (tests).
+export function httpReadAt(urls, { fetch: f = globalThis.fetch, headers = {}, resolve = false, ttlMs = 50 * 60e3, now = () => Date.now(), direct = new Map() } = {}) {
+  const first = new Map();    // original url -> the request that will tell where it redirects
+  // (direct: original url -> { url, until }, or PLAIN: it answered without a redirect, nothing to wait for)
+  const keep = (url, r) => {
+    if (!resolve || (r.status !== 206 && r.status !== 200)) return;
+    if (!r.redirected || !r.url || r.url === url) { if (!direct.has(url)) direct.set(url, PLAIN); return; }
+    let until = now() + ttlMs;
+    const exp = /[?&]Expires=(\d{9,})/.exec(r.url);
+    if (exp) until = Math.min(until, +exp[1] * 1000 - 5 * 60e3);
+    if (until > now()) direct.set(url, { url: r.url, until });
+  };
+  const get = async (url, off, len, signal) => {
+    const init = { headers: { ...headers, Range: `bytes=${off}-${off + len - 1}` }, ...(signal ? { signal } : {}) };
+    if (resolve && !direct.get(url) && first.has(url)) {
+      await first.get(url).catch(() => {});
+      if (signal?.aborted) throw signal.reason ?? Object.assign(new Error("aborted"), { name: "AbortError" });
+    }
+    const d = resolve ? direct.get(url) : null;
+    if (d && d !== PLAIN && d.until > now()) {
+      try {
+        const r = await f(d.url, init);
+        if (r.status === 206 || r.status === 200) return r;
+        r.body?.cancel?.()?.catch?.(() => {});
+      } catch (e) { if (signal?.aborted || e?.name === "AbortError") throw e; }
+      if (direct.get(url) === d) direct.delete(url);   // expired or refused: through the original URL again
+    }
+    const p = f(url, init);
+    if (resolve && !direct.has(url) && !first.has(url)) { first.set(url, p); p.then(() => first.delete(url), () => first.delete(url)); }
+    const r = await p;
+    keep(url, r);
+    return r;
+  };
+  return async (file, off, len, { signal } = {}) => {
     const url = urls[file];
     if (!url) throw new Error(`n-gram: no URL for file ${file}`);
-    const r = await f(url, { headers: { ...headers, Range: `bytes=${off}-${off + len - 1}` } });
+    const r = await get(url, off, len, signal);
     const hdr = (k) => r.headers?.get?.(k) ?? null;
     const refuse = (why) => { r.body?.cancel?.()?.catch?.(() => {}); throw new Error(`n-gram: ${url} ${why}`); };
     if (r.status === 206) {
@@ -332,19 +376,32 @@ export const ngramFileName = (h) => `ngram-${String(h).padStart(2, "0")}.bin`;
 // Copy the table out of the GGUF into per-head files, in chunks: read through readAt (layout "tensor" addressing:
 // file cfg.shard at cfg.byteOffset), write through write(h, bytes, byteOffsetInHeadFile). chunkRows rows a read.
 // onProgress(doneBytes, totalBytes). The writer is the caller's (an OPFS writable, a Node file).
-export async function splitHeads(cfg, readAt, write, { chunkRows = 1 << 16, heads = null, onProgress = null } = {}) {
+// readAhead: reads in flight (the next chunks are asked for while one is written; writes stay in order). One read
+// at a time pays a round trip per chunk: over Hugging Face (a 302, then the CDN's first byte) a head copied at
+// ~9 MB/s with 5.6 MB chunks. A failed read stops the copy; the reads still in flight are left to settle.
+export async function splitHeads(cfg, readAt, write, { chunkRows = 1 << 16, heads = null, onProgress = null, readAhead = 1 } = {}) {
   const RB = cfg.rowBytes, list = heads || [...Array(cfg.nHeads).keys()];
   const total = list.reduce((a, h) => a + cfg.vocab[h] * RB, 0);
-  let done = 0;
-  for (const h of list) {
-    for (let r = 0; r < cfg.vocab[h]; r += chunkRows) {
-      const n = Math.min(chunkRows, cfg.vocab[h] - r);
-      const b = await readAt(cfg.shard, cfg.byteOffset + (cfg.offsets[h] + r) * RB, n * RB);
-      if (b.byteLength < n * RB) throw new Error(`n-gram split: short read in head ${h} at row ${r}`);
-      await write(h, b, r * RB);
-      done += n * RB;
-      onProgress?.(done, total);
+  const chunks = [];
+  for (const h of list) for (let r = 0; r < cfg.vocab[h]; r += chunkRows) chunks.push([h, r, Math.min(chunkRows, cfg.vocab[h] - r)]);
+  const ahead = Math.max(1, readAhead | 0), reads = [];
+  let next = 0, done = 0;
+  const more = () => {
+    while (reads.length < ahead && next < chunks.length) {
+      const [h, r, n] = chunks[next++];
+      const p = readAt(cfg.shard, cfg.byteOffset + (cfg.offsets[h] + r) * RB, n * RB);
+      p.catch?.(() => {});   // (a failure surfaces where it is awaited)
+      reads.push(p);
     }
+  };
+  for (const [h, r, n] of chunks) {
+    more();
+    const b = await reads.shift();
+    if (b.byteLength < n * RB) throw new Error(`n-gram split: short read in head ${h} at row ${r}`);
+    more();
+    await write(h, b, r * RB);
+    done += n * RB;
+    onProgress?.(done, total);
   }
   return total;
 }

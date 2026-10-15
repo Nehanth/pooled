@@ -262,6 +262,38 @@ test("solo host: a pinned prefix goes to disk; after a restart it is read back a
   assert.equal(host(null).diskRoomKey(), null);
 });
 
+test("Flash: a v2 signature (the engine's, with QSA) round trips; a v1 copy reads as missing; the KV in the key is the engine's", async () => {
+  const dir = tmpDir();
+  // room/flash.js FlashRoomEngine.stateSignature: engine/qwen4exp.js stateSignature, then the adapter's v 2, hDim, ple
+  const V2 = { v: 2, arch: "qwen4exp", lo: 0, hi: 24, kv: "f32", qsa: true, qsaRing: 1024, dim: 2560, hDim: 10240, ple: [1] };
+  const V1 = { v: 1, arch: "qwen4exp", lo: 0, hi: 24, hDim: 10240, kv: "f32", ple: [1] };
+  const flash = (sig) => { const n = host(dir, { sig }); n.ai.model = "qwen3.8-flash"; n.ai.held.model = "qwen3.8-flash"; return n; };
+  // held.kv is the room's Qwen 3.5 ask ("f16" here); a Flash device reports its engine's format
+  assert.equal(flash(V2).diskLocal().kv, "f32");
+  assert.equal(flash({ ...V2, kv: "f16" }).diskLocal().kv, "f16");
+  assert.notEqual(flash(V2).diskRoomKey(), flash({ ...V2, kv: "f16" }).diskRoomKey(), "the KV format is in the room key");
+  // an old (v1) copy on disk
+  const old = flash(V1);
+  old.ai.diskRoom = old.diskRoomKey();
+  await gen(old, [...S, ...Q], [40]);
+  await old.disk.q;
+  assert.equal(fs.readdirSync(dir).length, 1);
+  const cold = flash(V2);
+  assert.notEqual(cold.diskRoomKey(), old.diskRoomKey());
+  assert.equal((await cold.diskRestoreAll()).restored, 0, "a v1 copy is a miss for a v2 engine");
+  cold.ai.diskRoom = cold.diskRoomKey();
+  const a = await gen(cold, [...S, ...Q], [40]);
+  assert.equal(a.from, null);
+  await cold.disk.q;
+  const warm = flash(V2);
+  const r = await warm.diskRestoreAll();
+  assert.equal(r.restored, 1); assert.deepEqual(r.tokens, [40]);
+  const b = await gen(warm, [...S, ...Q], [40]);
+  assert.equal(b.from, "pin"); assert.deepEqual(b.tokens, a.tokens);
+  // QSA off (a range without a QSA layer, or a dense engine) or another raw-key ring: another signature, a miss
+  for (const sig of [{ ...V2, qsa: false }, { ...V2, qsaRing: 2048 }]) assert.equal((await flash(sig).diskRestoreAll()).restored, 0);
+});
+
 test("host + worker: each device writes its own part when the save reaches it; restore needs every device's copy", async () => {
   const hdir = tmpDir(), wdir = tmpDir();
   const h = host(hdir), w = worker(wdir), net = pair(h, w);

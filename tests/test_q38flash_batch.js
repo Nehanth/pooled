@@ -5,7 +5,8 @@
 //
 // Default: the first LAYERS (4) layers, no head (DeltaNet 0, the PLE layer 1, DeltaNet 2, QSA layer 3), on the
 // first NTOK (4300) tokens of the ctx8k golden's prompt, so the context passes QSA's 2051 cells. The reference is
-// the decode engine, one token at a time; every check compares the output residual (4 x 2560 floats) bit for bit:
+// the decode engine, one token at a time; every check of the exact kernels (exact: true, 64-column passes) compares
+// the output residual (4 x 2560 floats) bit for bit:
 //   QSA vs reference    past 2051 cells, the decode engine's QSA state on the real activations of the last QSA layer
 //                       (layer 3) against the CPU reference (tests/reference/qsa_ref.mjs): raw keys, every pooled
 //                       key (re-pooled on the CPU from the GPU's raw keys), and at sampled positions the indexer
@@ -16,12 +17,31 @@
 //   QSA == dense        below 2052 cells: every pass forced onto the gathered (QSA) attention, decode and prefill
 //   verify / accept     verify passes of 6 columns with random accepts (state restored and re-run), across 2052
 //   timing              decode vs prefill tok/s for these layers
-// OFFLOAD=lo-hi [OFFLOAD_SLOTS=N]: those layers' routed experts parked in the expert store (engine/expert_store.js),
-// the engine built with expertRegion: true, so the batched passes route them through the store's region and decode
-// through its pools. Every check above still compares against the decode engine; the "BITS" line (a hash of the
-// 64-column prefill's residuals) must equal the resident run's.
-// FULL=1: all 48 layers and the head (~75 GB of GPU memory): greedy ids vs llama.cpp
-// (tests/golden/q38flash_llama_greedy.json, every case including ctx4k / ctx8k; ctx2k and ctx2k_b stay dense at
+// Then the wide kernels (engine/wgsl/qwen4exp_wide.js), the default batch (f32) and, when the device has dp4a, a
+// dp4a one (DP4A=0|1|moe|dense picks one mode instead), each within its BOUNDS (relative error of a column's
+// residual, p99 and max over the columns):
+//   per layer           against the exact kernels, the residual after every layer (taps), passes 0, 4 and the last
+//   wide ~ decode       the output against the decode steps: maxCols-column passes (1021 with the default raw-key
+//                       ring), mixed sizes (narrow passes take the
+//                       exact kernels), across 2051 / 2052, interleaved with decode steps; and twice the same bits
+//   wide verify/accept  a wide batch with verifyCols 24: verify passes and accept's replays (17+ columns) on the
+//                       exact kernels, every column bit-equal to decode
+// MAXBIND=<bytes> (with a large MAXSEQ, e.g. MAXSEQ=200000 MAXBIND=134217728, WebGPU's default limit): the wide
+// batches' maxCols capped by QSA's score scratch (671 columns there), the checks above at that width.
+// KV=f16: the engine's f16 K / V cache (default f32); every check above holds as is (decode, exact prefill and verify
+// read the same f16 cache, and so does the wide attention). QSA_RING=n: the raw-key ring's rows (default the
+// engine's, 1024; 0 = one per position); with a ring the QSA check collects the raw keys from it as the decode reference runs (every ring / 2 steps).
+// OFFLOAD=lo-hi [OFFLOAD_SLOTS=N] [REGION=shared]: those layers' routed experts parked in the expert store (engine/expert_store.js),
+// the engine built with expertRegion: true (REGION=shared: the region borrowed from the pools, as a room node with a
+// small cache), so the batched passes route them through the store's region and decode
+// through its pools. Every check above still compares against the decode engine; the "BITS" lines (hashes of the
+// 64-column exact prefill's and the wide prefills' residuals) must equal the resident run's.
+// FULL=1: all 48 layers and the head (~75 GB of GPU memory), with the default (wide) batch, EXACT=1 for the exact one:
+// the wide kernels per layer against the exact ones (a short prompt within BOUNDS; and the last LONG_TAIL (128) columns
+// of LONG_CASE (ctx2k1, past 2051 cells; ctx32k for 32K) within DRIFT_X of a second wide width's drift, see full()),
+// then greedy ids vs llama.cpp
+// (tests/golden/q38flash_llama_greedy.json, every case that fits MAXSEQ (8448 by default: up to ctx4k / ctx8k; the long
+// goldens are LONG=1's, which runs them through the same wide prefill); ctx2k and ctx2k_b stay dense at
 // long positions (1887 and 1943 prompt tokens, + 64 <= 2051 cells), ctx2k1 (2082) is just past 2051 cells, where
 // QSA drops a few blocks) with the prompt run by the batched prefill, judged by tests/q38flash_rule.js (a difference
 // passes only at a backend near tie: our token within 0.5 nats of llama.cpp's top there, our own top-2 gap under
@@ -29,10 +49,20 @@
 // columns over the golden continuation giving the decode steps' ids, accept(8) (the full-length accept only; partial
 // accepts are covered by the layered mode). Cases that share a prompt prefix and fail at the same step on the same
 // token count as one failure seen again: a near tie in the later one does not excuse it.
+// LONG=1: long context on the full model (all 48 layers + head, QSA on): the long goldens (ctx16k, ctx32k and
+// needle30k, ~15.7K / ~32K / ~29.7K prompt tokens; CASES=a,b picks others) run by the batched prefill, then decode,
+// judged by tests/q38flash_rule.js; per case the prefill time and tok/s, and decode tok/s. needle30k is a needle in
+// a haystack: a passphrase planted ~2.5K tokens in, asked for at the end; it fails when llama.cpp's answer has the
+// passphrase and ours does not (and its ids are judged as any golden's). MAXSEQ defaults to the longest case's prompt
+// + ids, rounded up to 256 (f32 K / V for 12 layers: ~1.6 GB at 32K). llama.cpp's 3 runs of these prompts part early
+// (ctx32k at step 0), so it also judges us against each run alone (that run's ids and top-5), and a case also passes
+// when the rule passes against one of llama.cpp's reruns. No verify pass or decode-only prefill here (a
+// 32K prompt is ~100 s with the wide prefill, ~15 minutes with EXACT=1).
 import fs from "node:fs";
 import path from "node:path";
 import { Qwen4ExpEngine } from "../engine/qwen4exp.js";
 import { Qwen4ExpBatch } from "../engine/qwen4exp_batch.js";
+import { qsaRingCols } from "../engine/qwen4exp_qsa.js";
 import { qwen4expWeights, qwen4expConfig, gpuUploadEntry } from "../engine/gguf.js";
 import { ngramConfig, NgramTable } from "../engine/ngram.js";
 import { openGGUF, gpuDevice, watchGpuErrors, offloadFromEnv } from "./load_model.js";
@@ -43,15 +73,21 @@ const env = (k, d) => Deno.env.get(k) ?? d;
 const DIR = env("Q38F_DIR", new URL("../models/q38flash", import.meta.url).pathname);
 const first = fs.readdirSync(DIR).filter((f) => /^Qwen3\.8-Flash-Next-.*-00001-of-\d{5}\.gguf$/.test(f))[0];
 if (!first) throw new Error("no Qwen3.8-Flash-Next shards in " + DIR);
-const FULL = env("FULL") === "1";
+const LONG = env("LONG") === "1", FULL = LONG || env("FULL") === "1";
 const gold = JSON.parse(fs.readFileSync(new URL("./golden/q38flash_llama_greedy.json", import.meta.url), "utf8"));
+const LONG_CASES = env("CASES") ? env("CASES").split(",") : ["ctx16k", "ctx32k", "needle30k"];
+if (LONG) for (const c of LONG_CASES) if (!gold[c]) throw new Error(`LONG=1: no golden "${c}" (tests/golden/make_q38flash_llama.js)`);
+const longSeq = LONG ? Math.ceil(Math.max(...LONG_CASES.map((c) => gold[c].prompt.length + gold[c].ids.length)) / 256) * 256 : 0;
 
 const { device } = await gpuDevice();
 const errors = watchGpuErrors(device);
 const model = openGGUF(path.join(DIR, first));
 const G = model.G, cfg = qwen4expConfig(G.meta);
 const nL = FULL ? cfg.L : +env("LAYERS", 4), hasHead = nL === cfg.L;
-const MAXSEQ = +env("MAXSEQ", FULL ? 8448 : 4608);
+// FULL: room for the short goldens (8448 cells: up to ctx8k; the long ones are LONG=1's) and for LONG_CASE's per-layer
+// check (full(): LONG_CASE=ctx32k raises it to ctx32k's length, and the long goldens then fit and run too; CASES picks)
+const lcLen = FULL ? (gold[env("LONG_CASE", "ctx2k1")]?.prompt.length ?? 0) : 0;
+const MAXSEQ = +env("MAXSEQ", LONG ? longSeq : FULL ? Math.max(8448, Math.ceil(lcLen / 256) * 256) : 4608), KV = env("KV", "f32");
 
 const experts = await offloadFromEnv(device, nL, model);   // (async since the disk tier, #349; a disk layer is refused by Qwen4ExpBatch.create)
 let t0 = performance.now();
@@ -69,14 +105,49 @@ const weights = { ...rest, layers };
 const fds = model.paths.map((p) => fs.openSync(p, "r"));
 const readAt = async (file, off, len) => { const b = new Uint8Array(len); fs.readSync(fds[file], b, 0, len, off); return b; };
 const ngram = new NgramTable(ngramConfig(G), { readAt, layout: "tensor" });
-const eng = await Qwen4ExpEngine.create({ device, meta: G.meta, weights, layerRange: [0, nL], hasEmbed: true, hasHead, ngram, maxSeq: MAXSEQ, expertRegion: !!experts });
-const pb = await Qwen4ExpBatch.create(eng, weights, { maxCols: +env("MAXCOLS", 64), verifyCols: 8 });
+const eng = await Qwen4ExpEngine.create({ device, meta: G.meta, weights, layerRange: [0, nL], hasEmbed: true, hasHead, ngram, maxSeq: MAXSEQ, expertRegion: experts ? (env("REGION", "") === "shared" ? "shared" : true) : false,
+  kv: KV, ...(env("QSA_RING") !== undefined ? { qsaRing: +env("QSA_RING") } : {}) });
+// pb: the exact kernels in the layered mode (its checks are bit for bit); in FULL mode the default (wide kernels for
+// prefill passes, maxCols 1024 capped to QSA's raw-key ring: 1021 with the default ring), EXACT=1 for the exact ones.
+// pf (layered mode): the default batch, the wide-kernel checks
+const EXACT = env("EXACT") === "1";
+// DP4A=0 / moe / dense / 1: the wide kernels' dp4a choice (default: the batch's, f32)
+const dpOpt = (v) => (v === undefined ? {} : { dp4a: v === "1" ? true : v === "0" ? false : v });
+const pb = await Qwen4ExpBatch.create(eng, weights, { ...(env("MAXCOLS") ? { maxCols: +env("MAXCOLS") } : FULL && !EXACT ? {} : { maxCols: 64 }), verifyCols: 8, exact: !FULL || EXACT,
+  ...(FULL ? dpOpt(Deno.env.get("DP4A")) : {}) });
+// MAXBIND=<bytes>: the wide batches see that binding limit (with a large MAXSEQ, QSA's score scratch caps maxCols)
+const wideOpts = { verifyCols: 8, ...(env("WIDE_COLS") ? { maxCols: +env("WIDE_COLS") } : {}), ...(env("MAXBIND") ? { maxBinding: +env("MAXBIND") } : {}) };
+const pf = FULL ? pb : await Qwen4ExpBatch.create(eng, weights, { ...wideOpts, ...dpOpt(env("DP4A")) });
+// the dp4a wide kernels too (when the device has them and DP4A does not pick a mode), with their own bounds
+const pfD = FULL || pf.dp4a || env("DP4A") !== undefined ? null : await Qwen4ExpBatch.create(eng, weights, { ...wideOpts, dp4a: true });
+const dpMode = (b) => (b.dpMoe && b.dpDense ? "dp4a" : b.dpMoe ? "moe" : b.dpDense ? "dense" : "f32");
+const pfMain = pf;
+if (env("MAXBIND")) {   // the cap must have bitten: fewer columns than asked (WIDE_COLS, or the default: 1024 within the raw-key ring)
+  const want = +env("WIDE_COLS", eng.qsa ? Math.min(1024, qsaRingCols(eng.qsaRing)) : 1024);
+  console.log(`MAXBIND ${env("MAXBIND")} at maxSeq ${MAXSEQ}: wide passes of ${pf.maxCols} columns (asked ${want})`);
+  if (!(pf.maxCols < want)) { console.log(`FAIL MAXBIND did not cap maxCols`); Deno.exit(1); }
+}
 if (experts) console.log(`offload: layers ${experts.layers[0]}-${experts.layers.at(-1)}, ${experts.P} slots per layer, region ${(experts.regionBytes / 2 ** 30).toFixed(2)} GiB`);
-console.log(`qwen4exp: ${nL} layers${hasHead ? " + head" : ""}, QSA ${eng.qsa ? "on" : "off"}, maxSeq ${MAXSEQ}, loaded in ${((performance.now() - t0) / 1000).toFixed(0)} s`);
+console.log(`qwen4exp: ${nL} layers${hasHead ? " + head" : ""}, QSA ${eng.qsa ? `on (raw-key ring ${eng.qsaRing || "off"})` : "off"}, KV ${eng.kv}, maxSeq ${MAXSEQ}, `
+  + `state ${(eng.stateBytes().state / 2 ** 20).toFixed(0)} MiB, loaded in ${((performance.now() - t0) / 1000).toFixed(0)} s`);
 
+// the wide kernels' bounds on the relative error of a column's residual (max |d| / max |ref|), per layer against the
+// exact kernels and on the output against decode: p99 over the columns, and the max. f32: the sums in another order
+// (measured p99 ~3e-6, max 2e-4 on 4 layers; the prompt is fixed, so a router near tie that would move one column by
+// ~1e-2 either shows up in every run or never: none does on these 4300 tokens). dp4a quantizes activations per 32 values, llama.cpp's
+// MMQ numerics (measured on 4 layers: the routed experts alone p99 1.2e-2 / max 3.6e-2; with the projections (the HC
+// ones stay f32) p99 1.8e-2 / max 5.7e-2)
+// f32 at ~10x / ~25x the measured p99 / max, so an error of ~1e-4 on every column, or of ~5e-3 on a few, fails.
+const BOUNDS = { f32: { p99: 3e-5, max: 5e-3 }, moe: { p99: 5e-2, max: 1e-1 }, dense: { p99: 5e-2, max: 1e-1 }, dp4a: { p99: 5e-2, max: 1e-1 } };
+// FULL=1, the whole model over thousands of positions (see full()): per layer, wide vs exact within DRIFT_X of the
+// drift between two wide widths (1024- and 512-column passes: the same kernels, another summation order), each
+// statistic floored at DRIFT_FLOOR (the single-pass rounding, where no drift has built up yet). No absolute bound:
+// the drift grows with the context (median column at layer 47: ~3e-3 at 2K, ~3e-2 at 32K, wide vs wide as much as
+// wide vs exact; docs/kernels.md)
+const DRIFT_X = 3, DRIFT_FLOOR = { p50: 3e-5, p99: 3e-5, max: 1e-3 };
 let fail = 0;
 const check = (ok, msg) => { console.log(`${ok ? "ok  " : "FAIL"} ${msg}`); if (!ok) fail++; };
-if (FULL) await full(); else await layered();
+if (LONG) await long(); else if (FULL) await full(); else await layered();
 if (experts) console.log(experts.summary());
 if (errors.count) { console.log(`${errors.count} GPU errors`); fail++; }
 console.log(fail ? "Q38FLASH BATCH FAIL" : "Q38FLASH BATCH PASS ✓");
@@ -109,14 +180,26 @@ async function layered() {
   // positions where the QSA check reads the decode step's indexer scratch (past 2051 cells: scored and selected)
   const qsaAt = eng.qsa ? [2051, 2052, 2053, 2600, 3333, NTOK - 1].filter((p, i, a) => p < NTOK && a.indexOf(p) === i) : [];
   const qsaSnap = new Map();
+  // the last QSA layer's raw keys of every position: with a ring, read every ring / 2 steps as the reference runs
+  const qL = eng.qsa ? eng.layers.findLast((l) => l.isQ) : null, ring = eng.qsaRing;
+  const rawAll = eng.qsa ? new Uint16Array(NTOK * QSA.ID) : null;
+  const ringRead = async (p) => {   // after the step at p: rows max(0, p + 1 - ring) .. p
+    const R = new Uint16Array(await readBuf(qL.st.qsa.rawK, ring * QSA.ID * 2));
+    for (let r = Math.max(0, p + 1 - ring); r <= p; r++) rawAll.set(R.subarray((r % ring) * QSA.ID, (r % ring + 1) * QSA.ID), r * QSA.ID);
+  };
   let t = performance.now(), tRead = 0;
   for (let p = 0; p < NTOK; p++) {
     ref.push((await eng.forwardToken(ids[p])).hidden);
-    if (qsaAt.includes(p)) { const tr = performance.now(); qsaSnap.set(p, await readQsaScratch(p)); tRead += performance.now() - tr; }
+    const tr = performance.now();
+    if (qsaAt.includes(p)) qsaSnap.set(p, await readQsaScratch(p));
+    if (eng.qsa && ring && ((p + 1) % (ring / 2) === 0 || p === NTOK - 1)) await ringRead(p);
+    tRead += performance.now() - tr;
   }
+  if (eng.qsa && !ring) rawAll.set(new Uint16Array(await readBuf(qL.st.qsa.rawK, NTOK * QSA.ID * 2)));
   const decTs = NTOK / ((performance.now() - t - tRead) / 1000);
   console.log(`decode reference: ${NTOK} tokens, ${decTs.toFixed(1)} tok/s (${nL} layers)`);
-  if (eng.qsa) await qsaVsRef(NTOK, qsaSnap);
+  if (eng.qsa) await qsaVsRef(NTOK, qsaSnap, rawAll);
+  if (env("WIDE_ONLY") === "1") { for (const b of [pf, pfD].filter((b) => b && (b === pf || b.dp4a))) await wideChecks(b, ids, ref, NTOK, decTs); return; }   // only the wide kernels' checks
 
   // prefill == decode, mixed pass sizes
   const run = async (label, chunks, n = NTOK, from = 0) => {
@@ -191,6 +274,103 @@ async function layered() {
     bad += cmpCols(r.hiddens, ref, p, 8).bad;
     check(bad === 0, `verify / accept: ${rounds} verify passes of 6 from ${start} (random accepts, to ${p}), then a pass: ${bad} columns differ from decode`);
   }
+  for (const b of [pf, pfD].filter((b) => b && (b === pf || b.dp4a))) await wideChecks(b, ids, ref, NTOK, decTs);
+}
+
+// ---- the wide kernels (the default batch, pf): within a tolerance of decode, per layer and on the output
+// relative error of one column: max |a - b| / max |b| over its hDim values
+function colRel(a, b, ao, bo, HD) {
+  let md = 0, mr = 0;
+  for (let i = 0; i < HD; i++) { md = Math.max(md, Math.abs(a[ao + i] - b[bo + i])); mr = Math.max(mr, Math.abs(b[bo + i])); }
+  return md / mr;
+}
+async function wideChecks(pf, ids, ref, NTOK, decTs) {
+  const HD = cfg.hDim, W = pf.maxCols, mode = dpMode(pf), { p99: LAYER_BOUND, max: MAX_BOUND } = BOUNDS[mode], OUT_BOUND = LAYER_BOUND;
+  console.log(`-- wide kernels: ${mode} (${W}-column passes)`);
+  // per layer: the wide kernels against the exact ones on the same passes (each from its own state), the residual
+  // after every layer; passes 0, 4 (past 2051 cells at 512 columns) and the last are compared
+  const keep = new Set([0, Math.min(4, Math.ceil(NTOK / W) - 1), Math.ceil(NTOK / W) - 1]);
+  const tapsOf = async (exact) => {
+    eng.reset();
+    const out = new Map(); let k = 0;
+    await pf.prefill(ids, { head: "none", exact, taps: true, onPass: (r, o, sz) => { if (keep.has(k)) out.set(k, { taps: r.taps, o, sz }); k++; } });
+    return out;
+  };
+  const tE = await tapsOf(true), tF = await tapsOf(false);
+  const errs = Array.from({ length: nL }, () => []);
+  for (const [k, e] of tE) {
+    const f = tF.get(k);
+    for (let l = 0; l < nL; l++) for (let c = 0; c < e.sz; c++) errs[l].push(colRel(f.taps[l], e.taps[l], c * HD, c * HD, HD));
+  }
+  const st = errs.map((a) => { const s = Float64Array.from(a).sort(); return { p50: s[s.length >> 1], p99: s[Math.floor(s.length * 0.99)], max: s[s.length - 1] }; });
+  for (let l = 0; l < nL; l++) console.log(`  layer ${l}: rel vs exact median ${st[l].p50.toExponential(2)}, p99 ${st[l].p99.toExponential(2)}, max ${st[l].max.toExponential(2)} (${errs[l].length} columns)`);
+  check(st.every((v) => v.p99 < LAYER_BOUND && v.max < MAX_BOUND), `wide (${mode}) vs exact per layer (${[...tE.keys()].map((k) => `pass ${k}`).join(", ")} of ${W} columns): p99 rel ${st.map((v) => v.p99.toExponential(2)).join(" ")} (bound ${LAYER_BOUND}), max ${st.map((v) => v.max.toExponential(2)).join(" ")} (bound ${MAX_BOUND})`);
+  // the output residual against the decode steps, every column, mixed pass sizes (narrow passes take the exact
+  // kernels), and a run across the 2051 / 2052 boundary
+  const dist = (a) => { const s = Float64Array.from(a).sort(); return { p50: s[s.length >> 1], p99: s[Math.floor(s.length * 0.99)], max: s[s.length - 1], over: a.filter((v) => v >= OUT_BOUND).length }; };
+  const fmt = (d) => `median ${d.p50.toExponential(2)}, p99 ${d.p99.toExponential(2)} (bound ${OUT_BOUND}), max ${d.max.toExponential(2)} (bound ${MAX_BOUND}; ${d.over} columns over ${OUT_BOUND})`;
+  const okD = (d) => d.p99 < OUT_BOUND && d.max < MAX_BOUND;
+  const run = async (label, chunks, n = NTOK, from = 0) => {
+    const es = []; let worstAt = -1, worst = 0, h = 0x811c9dc5;
+    const tt = performance.now();
+    await pf.prefill(ids.slice(from, from + n), { chunks, head: "none", wantHidden: true, onPass: (r, o, sz) => {
+      for (let c = 0; c < sz; c++) { const e = colRel(r.hiddens, ref[from + o + c], c * HD, 0, HD); es.push(e); if (e > worst) { worst = e; worstAt = from + o + c; } }
+      for (const w of new Uint32Array(r.hiddens.buffer, r.hiddens.byteOffset, r.hiddens.length)) h = Math.imul(h ^ w, 0x01000193) >>> 0;
+    } });
+    const ts = n / ((performance.now() - tt) / 1000), d = dist(es);
+    check(okD(d), `${label}: ${n} tokens, rel vs decode ${fmt(d)}, worst at ${worstAt}; ${ts.toFixed(1)} tok/s incl. readback`);
+    return h.toString(16).padStart(8, "0");
+  };
+  eng.reset();
+  const hw = await run(`wide (${mode}) prefill ~ decode, ${W}-column passes`, [W]);
+  console.log(`BITS ${nL} layers, ${NTOK} tokens, ${W}-column wide (${mode}) prefill residual hash ${hw}${experts ? " (offloaded)" : " (resident)"}`);
+  eng.reset();
+  await run(`wide (${mode}) prefill ~ decode, passes 16,300,1,512,40,17,512`, [16, 300, 1, 512, 40, 17, 512]);
+  eng.reset();
+  await run(`wide (${mode}) prefill ~ decode, passes across 2051 / 2052`, [512, 512, 512, 512, 3, 1, 16, 64], Math.min(NTOK, 2200));
+  // twice the same: the same bits (the grouped MoE's pair order is free, its sums are not)
+  { eng.reset(); const a = await pf.prefill(ids.slice(0, W), { head: "none", wantHidden: true }); eng.reset(); const b = await pf.prefill(ids.slice(0, W), { head: "none", wantHidden: true });
+    const same = new Uint32Array(a.hiddens.buffer).every((x, i) => x === new Uint32Array(b.hiddens.buffer)[i]);
+    check(same, `wide (${mode}) prefill twice: ${same ? "the same bits" : "DIFFERENT bits"}`); }
+  // interleave: a wide prefill, decode steps, a wide prefill again
+  {
+    eng.reset();
+    const a = Math.min(1500, NTOK - 400), b = a + 20;
+    const es = [];
+    const r1 = await pf.prefill(ids.slice(0, a), { head: "none", wantHidden: true });
+    const n1 = r1.hiddens.length / HD;
+    for (let c = 0; c < n1; c++) es.push(colRel(r1.hiddens, ref[a - n1 + c], c * HD, 0, HD));
+    for (let p = a; p < b; p++) es.push(colRel((await eng.forwardToken(ids[p])).hidden, ref[p], 0, 0, HD));
+    const r2 = await pf.prefill(ids.slice(b, b + 300), { head: "none", wantHidden: true, chunks: [300] });
+    for (let c = 0; c < 300; c++) es.push(colRel(r2.hiddens, ref[b + c], c * HD, 0, HD));
+    const d = dist(es);
+    check(okD(d), `wide (${mode}) interleave: prefill 0..${a}, decode ${a}..${b}, prefill ${b}..${b + 300}: rel vs decode ${fmt(d)}`);
+  }
+  // verify / accept on a wide batch with verify passes of 24 columns: verify runs the exact kernels, and so must
+  // accept's replay of n >= FAST_MIN_COLS (16) columns, or the kept state is not the one verify scored: every
+  // column (verify, then a pass on the accepted state) bit-equal to decode
+  if (pf === pfMain) {
+    const pv = await Qwen4ExpBatch.create(eng, weights, { ...wideOpts, verifyCols: 24, dp4a: pf.dp4a ? (mode === "dp4a" ? true : mode) : false });
+    eng.reset();
+    const start = Math.min(2040, NTOK - 80);
+    await pv.prefill(ids.slice(0, start), { head: "none", exact: true });
+    let p = start, bad = 0;
+    for (const k of [20, 17, 24]) {
+      const r = await pv.verify(ids.slice(p, p + 24), { wantHidden: true });
+      bad += cmpCols(r.hiddens, ref, p, 24).bad;
+      await pv.accept(k); p += k;
+    }
+    const r = await pv.prefill(ids.slice(p, p + 8), { head: "none", wantHidden: true, chunks: [8] });
+    bad += cmpCols(r.hiddens, ref, p, 8).bad;
+    check(bad === 0, `wide batch (${mode}), verifyCols 24: verify 24 / accept 20, 17, 24 from ${start}, then a pass: ${bad} columns differ from decode (accept's replay on the exact kernels)`);
+  }
+  // speed
+  eng.reset();
+  const t = performance.now();
+  await pf.prefill(ids, { head: "none" });
+  await device.queue.onSubmittedWorkDone();
+  const ts = NTOK / ((performance.now() - t) / 1000);
+  console.log(`wide (${mode}) prefill: ${NTOK} tokens, ${ts.toFixed(1)} tok/s (${nL} layers, ${W}-column passes) vs decode ${decTs.toFixed(1)}: ${(ts / decTs).toFixed(1)}x`);
 }
 
 // ---- QSA on the real activations vs the CPU reference (decode engine, the last QSA layer in range)
@@ -206,16 +386,15 @@ async function readQsaScratch(p) {
   return { proj: new Float32Array(await readBuf(S.proj, 640 * 4)), qi: new Float32Array(await readBuf(S.qi, 512 * 4)),
     scores: nv > QSA.N_TOP ? new Float32Array(await readBuf(S.scores, nv * 4)) : null, rows: sel.slice(1, 1 + sel[0]) };
 }
-function f16s(ab) { return Float32Array.from(new Uint16Array(ab), h2f); }
 function rel(g, r) { let md = 0, mr = 0; for (let i = 0; i < r.length; i++) { md = Math.max(md, Math.abs(g[i] - r[i])); mr = Math.max(mr, Math.abs(r[i])); } return md / mr; }
 
-async function qsaVsRef(n, snaps) {
+async function qsaVsRef(n, snaps, rawAll) {
   const li = eng.layers.findLastIndex((l) => l.isQ), l = eng.layers[li], ix = weights.layers[li].indexer;
   if (cfg.ropeTheta !== QSA.THETA || cfg.ropeDims !== QSA.NROT) console.log(`  note: the reference ropes with ${QSA.NROT} dims, base ${QSA.THETA}; the model has ${cfg.ropeDims}, ${cfg.ropeTheta}`);
   const tag = `QSA vs reference, layer ${l.i}`;
   // raw keys: the GPU's cache, and at the sampled positions == the step's own k projection rounded to f16
   const cache = new QsaRefCache({ maxSeq: n });
-  cache.rawK.set(f16s(await readBuf(l.st.qsa.rawK, n * QSA.ID * 2)));
+  cache.rawK.set(Float32Array.from(rawAll, h2f));
   cache.n = n;
   let rawBad = 0;
   for (const [p, s] of snaps) for (let d = 0; d < QSA.ID; d++) if (f16bits(s.proj[512 + d]) !== f16bits(cache.rawK[p * QSA.ID + d])) rawBad++;
@@ -260,6 +439,61 @@ function gap(lg) {
 }
 
 async function full() {
+  // the wide kernels per layer on the whole model (with the head), against the exact ones: a short prompt in one pass
+  // (the layered BOUNDS), and the last LONG_TAIL columns of LONG_CASE (default ctx2k1, past 2051 cells: QSA selecting),
+  // each from its own prefill of the rest. Over thousands of positions and 48 layers wide and exact drift apart by
+  // more than one pass's rounding: a near tie in a router (or a QSA block score) flips at some column, that column moves
+  // by ~1e-2, and the DeltaNet state and attention carry part of it to every later column (from ~layer 20 on). Two wide
+  // widths (pb, and LONG_WIDTHS (512, 256, 768): other pass boundaries and split-K, so other summation orders) drift the
+  // same way, so the long check is comparative: per layer, wide vs exact's median, p99 and max within DRIFT_X of the
+  // largest wide vs other-width drift (each floored at DRIFT_FLOOR). One other width is not enough at 32K: a column
+  // that flips at a late layer moves by up to ~1 (relative) between some pair of widths and not others. A kernel error well above the model's own
+  // sensitivity (on every column, or on a minority) shows in wide vs exact but not between the wide widths (same kernels).
+  if (!pb.exact) {
+    const HD = cfg.hDim, mode = dpMode(pb), Bd = BOUNDS[mode];
+    const dpo = dpMode(pb) === "f32" ? false : dpMode(pb) === "dp4a" ? true : dpMode(pb);
+    // LONG_WIDTHS: the other wide widths whose drift from pb makes the envelope (per layer and statistic, the largest)
+    const widths = env("LONG_WIDTHS", "512,256,768").split(",").map(Number).filter((w) => w >= 16 && w < pb.maxCols);
+    const pbs = [];
+    for (const w of widths) pbs.push(await Qwen4ExpBatch.create(eng, weights, { maxCols: w, verifyCols: 8, dp4a: dpo }));
+    const LC = env("LONG_CASE", "ctx2k1"), LT = +env("LONG_TAIL", 128);
+    if (gold[LC].prompt.length > MAXSEQ) throw new Error(`LONG_CASE ${LC}: ${gold[LC].prompt.length} tokens > MAXSEQ ${MAXSEQ}`);
+    const cols = (a, b, n) => a.map((_, l) => Array.from({ length: n }, (_, c) => colRel(a[l], b[l], c * HD, c * HD, HD)));
+    const stats = (a, b, n) => cols(a, b, n).map((es) => {
+      es = es.slice().sort((x, y) => x - y);
+      return { p50: es[es.length >> 1], p99: es[Math.floor(es.length * 0.99)], max: es[es.length - 1] };
+    });
+    const worstOf = (st) => st.reduce((a, b) => ({ p50: Math.max(a.p50, b.p50), p99: Math.max(a.p99, b.p99), max: Math.max(a.max, b.max) }));
+    for (const [label, ids, tail, long] of [["two-sum", gold["two-sum"].prompt, gold["two-sum"].prompt.length, false], [`${LC} tail`, gold[LC].prompt, LT, true]]) {
+      const tapsOf = async (b, exact) => {
+        eng.reset();
+        const t = performance.now();
+        if (ids.length > tail) await b.prefill(ids.slice(0, -tail), { head: "none", exact });
+        const r = (await b.prefill(ids.slice(-tail), { head: "none", exact, taps: true, chunks: [tail] })).taps;
+        if (long) console.log(`  ${label}: ${exact ? "exact" : `wide ${b.maxCols}`} prefill of ${ids.length} tokens in ${((performance.now() - t) / 1000).toFixed(0)} s`);
+        return r;
+      };
+      const e = await tapsOf(pb, true), f = await tapsOf(pb, false), st = stats(f, e, tail), worst = worstOf(st);
+      if (!long) {
+        check(worst.p99 < Bd.p99 && worst.max < Bd.max, `wide (${mode}) vs exact per layer, ${label} (${tail} columns): worst layer median ${worst.p50.toExponential(2)}, p99 ${worst.p99.toExponential(2)} (bound ${Bd.p99}), max ${worst.max.toExponential(2)} (bound ${Bd.max})`);
+        continue;
+      }
+      const fw = []; for (const b of pbs) fw.push(await tapsOf(b, false));
+      const sws = fw.map((g) => stats(f, g, tail));
+      const sw = st.map((_, l) => ({ p50: Math.max(...sws.map((x) => x[l].p50)), p99: Math.max(...sws.map((x) => x[l].p99)), max: Math.max(...sws.map((x) => x[l].max)) }));
+      const ratio = st.map((v, l) => Math.max(...["p50", "p99", "max"].map((k) => v[k] / Math.max(sw[l][k], DRIFT_FLOOR[k]))));
+      const bad = ratio.flatMap((r, l) => (r > DRIFT_X ? [l] : []));
+      const W2 = pbs.map((b) => b.maxCols).join("/");
+      for (const l of [...new Set([0, 6, 12, 18, 24, 30, 36, 42, 47, ...bad])].sort((a, b) => a - b)) console.log(`  layer ${l}: wide vs exact median ${st[l].p50.toExponential(2)} p99 ${st[l].p99.toExponential(2)} max ${st[l].max.toExponential(2)} | wide ${pb.maxCols} vs ${W2} median ${sw[l].p50.toExponential(2)} p99 ${sw[l].p99.toExponential(2)} max ${sw[l].max.toExponential(2)} (max per width ${sws.map((x) => x[l].max.toExponential(1)).join(" ")}) | ratio ${ratio[l].toFixed(2)}`);
+      const rl = ratio.indexOf(Math.max(...ratio));
+      {   // the columns behind the worst ratio: wide vs exact, and vs each other width
+        const ce = cols(f, e, tail)[rl], cw = fw.map((g) => cols(f, g, tail)[rl]);
+        const top = ce.map((v, c) => [v, c]).sort((a, b) => b[0] - a[0]).slice(0, 4);
+        console.log(`  layer ${rl}, largest wide-vs-exact columns: ${top.map(([v, c]) => `col ${ids.length - tail + c}: ${v.toExponential(2)} (vs widths ${cw.map((x) => x[c].toExponential(1)).join(" ")})`).join("; ")}`);
+      }
+      check(!bad.length, `wide (${mode}) vs exact per layer, ${label} (${tail} columns at ${ids.length - tail}): within ${DRIFT_X}x of the wide ${pb.maxCols} vs ${W2} drift at every layer (worst ratio ${ratio[rl].toFixed(2)} at layer ${rl}${bad.length ? `; over at layers ${bad.join(",")}` : ""}); worst layer median ${worst.p50.toExponential(2)}, p99 ${worst.p99.toExponential(2)}, max ${worst.max.toExponential(2)}; the wide-wide drift: median ${worstOf(sw).p50.toExponential(2)}, p99 ${worstOf(sw).p99.toExponential(2)}, max ${worstOf(sw).max.toExponential(2)}`);
+    }
+  }
   const tok = model.tokenizer();
   const pick = env("CASES") ? env("CASES").split(",") : null;
   const results = [];
@@ -307,7 +541,8 @@ async function full() {
   // Same engine, a second batch: its 64-column prefill's logits == the verifyCols 8 batch's bit for bit, its id ==
   // the decode engine's, and a 1-column verify gives decode's next id.
   {
-    const g = gold["two-sum"], pb1 = await Qwen4ExpBatch.create(eng, weights, { maxCols: 64, verifyCols: 1 });
+    // (pb's other options: the wide kernels' split-K depends on maxCols, so another width would sum in another order)
+    const g = gold["two-sum"], pb1 = await Qwen4ExpBatch.create(eng, weights, { maxCols: pb.maxCols, verifyCols: 1, exact: pb.exact, dp4a: pb.dpMoe && pb.dpDense ? true : pb.dpMoe ? "moe" : pb.dpDense ? "dense" : false });
     eng.reset(); const dec = await eng.prefillTokens(g.prompt, { wantLogits: true }), next = (await eng.forwardToken(dec.id)).id;
     eng.reset(); const r8 = await pb.prefill(g.prompt, { wantLogits: true });
     eng.reset(); const r1 = await pb1.prefill(g.prompt, { wantLogits: true });
@@ -322,4 +557,51 @@ async function full() {
   for (const [label, rs] of [["dense (<= 2051 cells)", phase(false)], ["long context (QSA past 2051 cells)", phase(true)]]) {
     if (rs.length) console.log(`${label}: ${rs.filter((r) => r.ok).length}/${rs.length} goldens match llama.cpp exactly (${rs.map((r) => `${r.name} ${r.ok ? "match" : `${r.tieOk ? "near tie" : "MISMATCH"} at ${r.diff}`}`).join(", ")})`);
   }
+}
+
+// ---- LONG=1: the long-context goldens, batched prefill (QSA) then decode
+async function long() {
+  const tok = model.tokenizer(), rows = [];
+  for (const name of LONG_CASES) {
+    const g = gold[name], N = Math.min(+env("TOKENS", g.ids.length), g.ids.length);
+    if (g.prompt.length + N > eng.maxSeq) { check(false, `${name}: ${g.prompt.length} + ${N} > maxSeq ${eng.maxSeq}`); continue; }
+    eng.reset();
+    // progress every ~4K tokens: the rate over that stretch alone, and the cumulative average since the prefill began
+    let t = performance.now(), next = 4096, lastN = 0, lastT = t;
+    let r = await pb.prefill(g.prompt, { wantLogits: true, onPass: (_, o, sz) => {
+      if (o + sz < next) return;
+      const now = performance.now();
+      console.log(`  ${name}: prefill ${o + sz}/${g.prompt.length}, ${((now - t) / 1000).toFixed(0)} s, last stretch ${((o + sz - lastN) / ((now - lastT) / 1000)).toFixed(1)} tok/s, cumulative ${((o + sz) / ((now - t) / 1000)).toFixed(1)} tok/s`);
+      next += 4096; lastN = o + sz; lastT = now;
+    } });
+    const pf = (performance.now() - t) / 1000;
+    const gen = [r.id], gaps = [gap(r.logits)];
+    t = performance.now();
+    while (gen.length < N) { r = await eng.forwardToken(gen[gen.length - 1], { wantLogits: true }); gen.push(r.id); gaps.push(gap(r.logits)); }
+    const ts = (N - 1) / ((performance.now() - t) / 1000);
+    const J = judgeGolden(g, gen, gaps, N), text = tok.decode(gen);
+    // llama.cpp is not reproducible here (its 3 runs part at steps 0-40): the rule against each run on its own, with
+    // that run's ids and top-5. The case passes by the rule on the golden (as FULL=1), or by the rule on one of
+    // llama.cpp's own reruns: matching a run llama.cpp itself produced, through the same rule, is as good as matching
+    // the first (needle30k's run 1: llama.cpp's golden and rerun take different tokens at step 40, our gap there 0.53)
+    const runs = [{ ids: g.ids, top: g.top }, ...(g.runs || [])];
+    const JR = runs.map((rn) => judgeGolden({ ids: rn.ids, top: rn.top }, gen, gaps, Math.min(N, rn.ids.length)));
+    const byRun = JR.findIndex((Jk, k) => k > 0 && (Jk.ok || Jk.excused));
+    let ok = J.ok || J.excused || byRun > 0, needle = "";
+    if (g.needle) {
+      const ours = text.includes(g.needle), theirs = g.found ?? g.text.includes(g.needle);
+      needle = ` · needle "${g.needle}": ours ${ours ? "found" : "MISSING"}, llama.cpp ${theirs ? "found" : "missing"}`;
+      if (theirs && !ours) ok = false;
+    }
+    console.log(`${ok ? "ok  " : "FAIL"} ${name}: prompt ${g.prompt.length} tok, prefill ${pf.toFixed(0)} s (${(g.prompt.length / pf).toFixed(1)} tok/s) · decode ${ts.toFixed(2)} tok/s at ${g.prompt.length} ctx · ${J.msg}${needle}`);
+    console.log(`  engine: ${JSON.stringify(text)}`);
+    if (!J.ok) console.log(`  golden: ${JSON.stringify(g.text)}\n  top-2 gap (nats) ours / llama.cpp, steps 0..${J.diff}: ${gaps.slice(0, J.diff + 1).map((x, i) => `${x.toFixed(3)}/${g.gap?.[i]?.toFixed(3)}`).join(" ")}`);
+    console.log(`  vs each llama.cpp run (0: the golden): ${JR.map((Jk, k) => `run ${k}: ${Jk.ok ? `all ${Math.min(N, runs[k].ids.length)} ids` : `${Jk.diff} ids, then ${Jk.excused ? "near tie" : "MISMATCH"}`}`).join(", ")}${!(J.ok || J.excused) && byRun > 0 ? ` (passes by run ${byRun})` : ""}`);
+    if (!ok) fail++;
+    // ids compared: how many of our ids equal llama.cpp's before the first difference, against the golden and at best
+    // against any of its runs. A pass on few ids is a near tie early on, not evidence of agreement on the answer
+    const cmp = JR.map((Jk, k) => (Jk.ok ? Math.min(N, runs[k].ids.length) : Jk.diff));
+    rows.push(`${name} | ${g.prompt.length} | ${pf.toFixed(0)} s (${(g.prompt.length / pf).toFixed(1)} tok/s) | ${ts.toFixed(2)} | ${cmp[0]} / ${Math.max(...cmp)} of ${N} | ${J.ok ? "match" : J.excused ? `near tie at ${J.diff}` : `MISMATCH at ${J.diff}`}${!(J.ok || J.excused) && byRun > 0 ? `, matches llama.cpp's run ${byRun} (${JR[byRun].ok ? "all ids" : `near tie at ${JR[byRun].diff}`})` : ""}${needle ? `, needle ${text.includes(g.needle) ? "found" : "MISSING"}` : ""}`);
+  }
+  console.log(`long context (QSA, maxSeq ${eng.maxSeq}, ${pb.maxCols}-column passes):\n  case | prompt | prefill | decode tok/s | ids equal before the first difference (golden / best run) | vs llama.cpp\n  ${rows.join("\n  ")}`);
 }

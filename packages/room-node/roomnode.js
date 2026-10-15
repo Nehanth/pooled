@@ -39,16 +39,19 @@ import { createPipeline } from "../../room/pipeline.js";
 import { createGenerator } from "../../engine/generate.js";
 import fs from "node:fs";
 import { EventEmitter } from "node:events";
-import { setupNode, probeMeta } from "./env.js";
+import { setupNode, probeMeta, minorGc, idleGcOn } from "./env.js";
+// POOLED_WIRE_DUP: frames of up to that many slices go out twice (room/transport.js; the page's ?wiredup=)
+const wireDupOpt = () => (process.env.POOLED_WIRE_DUP !== undefined && +process.env.POOLED_WIRE_DUP >= 0 ? { dup: Math.min(64, +process.env.POOLED_WIRE_DUP) } : {});
 import * as env from "./env.js";
 import { openModel } from "./source.js";
 import { loadShard } from "./shard.js";
 import { makeLink, attachWire, holdWire, wireReady, sendFrame, PROTOCOL, DROP_ALL } from "../../room/transport.js";
 import { unpackWire, wireStats } from "../../room/wire.js";
 import { TeleMeter, expertStoreOf } from "../../room/tele.js";
-import { isPhoneMeta, roomFit, dealRoom, shortNote, specWithOffload, dealOffloads, parseForce } from "../../room/plan.js";
+import { isPhoneMeta, roomFit, dealRoom, shortNote, specWithOffload, dealOffloads, parseForce, layersTotal } from "../../room/plan.js";
 import { verifyHost, hostAllowed, startBusy, startFrom, joinOrder, START_PENDING_MS } from "../../room/authz.js";
-import { MODELS, CTX, roomBytes, maxSeqFor, ctxForBinding, kvModeFor, kvForLoad, kvBytesPerLayerPos, MAX_NEW, MIN_ROOM, pickCtx, ctxShortNote, expertsOf, ngramOf } from "../../room/models.js";
+import { MODELS, CTX, roomBytes, maxSeqFor, ctxForBinding, kvModeFor, kvForLoad, kvBytesPerLayerPos, MAX_NEW, MIN_ROOM, pickCtx, ctxShortNote, expertsOf, ngramOf, flashLayerCost,
+  flashRoomFormat, flashReadyFields, readyCtxShort, flashDealReserve } from "../../room/models.js";
 import { CkptIndex, CKPT_DEFAULTS, boundaryPin, pinPoints, cutPoints, turnPoint } from "./ckpt.js";
 import { CkptDisk, modelFileId, prefixHash, roomKey } from "./ckptdisk.js";
 import { isPrefix } from "../../harness/prefix.js";
@@ -57,8 +60,9 @@ import { pickSampler } from "../../room/sampling.js";
 import { validateApiAsk, apiPrompt, apiRun, AnswerCache, helloMeta, pieceDecoder, API_LIMITS, apiPrompt2, apiRun2, TurnCache, EncodeCache } from "../../room/api.js";
 import { tokenTexts } from "../../harness/model-common.js";
 import { uniqueName, PING_MS, lastHeard, isSilentGone, staleNamesakes, NAME_PROBE_MS } from "../../room/liveness.js";
+import { loadKey } from "../../room/startstop.js";
 import { resumableGenerate, waitForRoom, sameShard, linkSilent, REJOIN_GRACE_MS, LINK_SILENT_MS } from "../../room/resume.js";
-import { pledgeGB, afterLoadDeath, offloadFor, ngramFor, PLEDGE_MAX_GB } from "../../room/pledge.js";
+import { pledgeGB, dealPledgeBytes, afterLoadDeath, offloadFor, ngramFor, PLEDGE_MAX_GB } from "../../room/pledge.js";
 import { localModels } from "./source.js";
 import { GGML_EMBED, GGML_OUTPUT, ggmlLayerNames, qwen35ShardBytes, qwen35MtpBytes, qwen4expConfig, qwen4expShardBytes } from "../../engine/gguf.js";
 import { guardChunks } from "../../cli/lib/room.js";
@@ -70,6 +74,9 @@ import { chatRecipients } from "../../room/visibility.js";
 import { Ask, Collector } from "../../cli/lib/answer.js";
 import { hostGate, gateHelloFields, holdConn, allowJoin, denyJoin, waitingJoins, joinHello, deviceGateMessage, onHostHello, meshHello, meshVerdict,
   keyFragment, randomCode, CODE_LEN } from "./gate.js";
+
+// a pledge's local list (model keys, room/pledge.js diskFor): strings only, short, at most 32
+export const cleanLocal = (a) => (Array.isArray(a) ? a.filter((k) => typeof k === "string" && k.length > 0 && k.length <= 64).slice(0, 32) : []);
 
 export const PREFIX = "pooled-room-";
 const CODE_ABC = "ABCDEFGHJKMNPQRSTVWXYZ23456789";   // room/plan.js codeFromLocation's alphabet
@@ -104,6 +111,10 @@ export const cleanName = (s, id) => String(s ?? id).replace(/[\u0000-\u001f\u007
 // tier, the layers whose experts stay in the files ([diskLo, hi)) and the RAM their cache takes
 const offloadMsg = (o) => ({ lo: o.lo, hi: o.hi, vramBytes: o.vramBytes, ramBytes: o.ramBytes, ...(o.ramSpare > 0 ? { ramSpare: o.ramSpare } : {}),
   ...(Number.isInteger(o.diskLo) ? { diskLo: o.diskLo, diskRamBytes: o.diskRamBytes } : {}) });
+// batchReserve (Qwen3.8-Flash-Next): the scratch this dealer kept back from the device's pledge (room/models.js
+// flashDealReserve), so an offloader that does not batch knows what it may give its expert cache (shard.js loadFlash).
+// Older devices ignore it; a device dealt by an older host sees none and gives nothing back
+export const withReserve = (msg, model) => (flashDealReserve(model) > 0 ? { ...msg, batchReserve: flashDealReserve(model) } : msg);
 
 export class RoomNode extends EventEmitter {
   // name, pledgeGB, signal ("host:port" PeerServer, null = the PeerJS cloud), modelDir, flags (engine
@@ -123,6 +134,13 @@ export class RoomNode extends EventEmitter {
     // specWithOffload): null = off there, on otherwise (the default); true / false = always on / off with offload.
     // POOLED_OFFLOAD_SPEC=1 / 0 sets it from the environment
     this.offloadSpec = offloadSpec === true || offloadSpec === false ? offloadSpec : null;
+    this.idleGc = idleGcOn();
+    // (diagnostics) POOLED_SLOWFRAME also logs event-loop stalls longer than it
+    if (+process.env.POOLED_SLOWFRAME > 0) {
+      let last = performance.now();
+      const lim = +process.env.POOLED_SLOWFRAME, t = setInterval(() => { const now = performance.now(); if (now - last > 50 + lim) this.log?.(`event loop stalled ${(now - last - 50).toFixed(0)} ms`); last = now; }, 50);
+      t.unref?.();
+    }
     // relay: ask for a TURN relay (cli/lib/relay.js) so links still open when no direct path works (strict NAT
     // or CGNAT on both ends). Default: on with a public signaling server, off with one on this machine (tests).
     this.relay = relay ?? !/^(localhost|127\.|\[::1\])/i.test(String(signal ?? ""));
@@ -195,7 +213,7 @@ export class RoomNode extends EventEmitter {
       apiCache: new AnswerCache(8), apiTurns: new TurnCache(), apiEnc: new EncodeCache(), apiProf: null, apiTT: null,
       apis: new Map(), runs: new Map(), degraded: false, model: null, range: null, online: false,
       plan: new Map(), gone: new Set(), chainNames: [], relinks: new Map(), lapStat: null, held: null,
-      shareCap: new Map(), dropped: new Set(), loadDeaths: new Map(),
+      shareCap: new Map(), dropped: new Set(), loadDeaths: new Map(), noDisk: new Set(),
       ckpt: null, dropQ: [], ckptCap: new Map(), bounds: new Map(),
       diskOf: new Map(), diskRoom: null, diskWait: new Map(), diskPend: new Map(), dealGen: 0 };
     this.pipeline = createPipeline({
@@ -404,7 +422,7 @@ export class RoomNode extends EventEmitter {
     // a device in the creator's roster: its name and meta from there until its hello says (the hello is
     // the first message on the link, and WebRTC can lose that one: room.js wire)
     const known = old ? null : (this.members || []).find((m) => m.id === conn.peer);
-    const e = { conn, name: name || old?.name || known?.name || conn.peer, meta: old?.meta || known?.meta || {}, link: makeLink(), stripes: [], seen: performance.now(), missed: 0, rtt: old?.rtt ?? null, initiator, stripesLater: !!(hold && stripesLater) };
+    const e = { conn, name: name || old?.name || known?.name || conn.peer, meta: old?.meta || known?.meta || {}, link: makeLink(wireDupOpt()), stripes: [], seen: performance.now(), missed: 0, rtt: old?.rtt ?? null, initiator, stripesLater: !!(hold && stripesLater) };
     if (hold) this.holdLink(e, hold);
     this.conns.set(conn.peer, e);
     if (old && old.conn !== conn) {
@@ -455,6 +473,8 @@ export class RoomNode extends EventEmitter {
   sendHidden(id, msg) {
     const e = this.conns.get(id);
     this.sent ||= { wire: 0, msg: 0 };
+    // the token's GPU wrappers are garbage now: collect them while this device waits for its next frame (env.js minorGc)
+    if (this.idleGc && !this.gcQueued) { this.gcQueued = true; setImmediate(() => { this.gcQueued = false; minorGc(); }); }
     if (e?.hold) { this.sendTo(id, msg); return; }
     if (e?.link && wireReady(e.link) && sendFrame(e.link, msg)) { this.sent.wire++; return; }
     this.sent.msg++;
@@ -659,10 +679,19 @@ export class RoomNode extends EventEmitter {
         return;
       case "ping": this.sendTo(from, { t: "pong", ts: d.ts }); return;
       case "pong": if (e) { e.missed = 0; if (Number.isFinite(d.ts)) e.rtt = performance.now() - d.ts; } return;
-      case "pledge":
-        if (e) e.meta = { ...e.meta, contribGB: d.gb };
-        if (this.isHost && this.roster.has(from)) { this.roster.get(from).meta = { ...this.roster.get(from).meta, contribGB: d.gb }; this.broadcastRoster(); }
+      case "pledge": {
+        // tabDisk (a tab's disk tier, when the message has it: its user said yes or no; room/pledge.js tabDiskGB)
+        // local (a room node with the disk tier, after it downloaded a model: announceLocal): the models whose files are all
+        // on its disk now (meta.local, room/pledge.js diskFor); kept only for a device that said it has a disk tier
+        const upd = (meta) => { const m = { ...meta, contribGB: d.gb }; if ("tabDisk" in d) { if (d.tabDisk && typeof d.tabDisk === "object") m.tabDisk = d.tabDisk; else delete m.tabDisk; }
+          if (m.disk && Array.isArray(d.local)) m.local = cleanLocal(d.local); return m; };
+        if (e) e.meta = upd(e.meta);
+        // it said yes after all: a disk tier room.js's cleanTabDisk keeps (RAM for it, the models it reads), not "ask"
+        const t = d.tabDisk;
+        if (t && typeof t === "object" && !t.ask && +t.ramGB > 0 && Array.isArray(t.models) && t.models.length) this.ai.noDisk.delete(e?.name || from);
+        if (this.isHost && this.roster.has(from)) { this.roster.get(from).meta = upd(this.roster.get(from).meta); this.broadcastRoster(); }
         return;
+      }
     }
   }
 
@@ -740,10 +769,22 @@ export class RoomNode extends EventEmitter {
       case "ai-wget": this.sendTo(from, { t: "ai-wpart", id: d.id, miss: 1 }); return;
       case "ai-genstart": case "ai-token": case "ai-gendone": case "ai-busy": case "ai-queued": this.emit("chat", d); return;
       // --- host
-      case "ai-ready":
+      case "ai-ready": {
         if (!this.hosting() || !ai.chain.includes(from)) return;
-        ai.readyPeers.add(from); ai.ckptCap.set(from, !!d.ckpt); ai.diskOf.set(from, d.disk && typeof d.disk === "object" ? d.disk : null); this.emit("progress", { name: e?.name, pct: 100 }); this.maybeReady();
+        // a worker whose engine holds fewer positions than the room's context (an older build loads Flash at 2048)
+        const short = readyCtxShort(ai.model, ai.roomCtx, d, ai.roomFlash);
+        if (short) {
+          this.log(`${e?.name || from}: ${short}`);
+          if (ai.starting) ai.startErr?.(new Error(`${e?.name || from} couldn't load its layers (${short})`));
+          return;
+        }
+        (ai.readyInfo ||= new Map()).set(e?.name || from, { ctx: +d.ctx || null, fsig: d.fsig && typeof d.fsig === "object" ? d.fsig : null });   // (logs, tests)
+        ai.readyPeers.add(from); ai.ckptCap.set(from, !!d.ckpt);
+        ai.diskOf.set(from, d.disk && typeof d.disk === "object" ? d.disk : null);
+        if (MODELS[ai.model]?.kind === "qwen4exp") (ai.batchOf ||= new Map()).set(from, d.batch === 1);   // (room/pipeline.js chainSlow)
+        this.emit("progress", { name: e?.name, pct: 100 }); this.maybeReady();
         return;
+      }
       case "ai-ckpt-loaded":   // worker -> host: the slots it read back from disk (diskRestore)
         if (!this.hosting() || !ai.chain.includes(from)) return;
         ai.diskWait.get(from)?.(Array.isArray(d.slots) ? d.slots : []);
@@ -760,6 +801,12 @@ export class RoomNode extends EventEmitter {
       case "ai-progress": this.emit("progress", { name: e?.name || from, pct: d.pct }); return;
       case "ai-error":
         this.log(`${e?.name || from} failed: ${d.message}`);
+        // a device refused the offload it was dealt: a tab keeping the model off its disk (nodisk), or a node from before
+        // Flash offload (0.4.1: "no expert offload yet"). Deal again once without its offload (_start's peers: ai.noDisk),
+        // not a failed start, as the room page does (room.js ai-error); a refusal from it after that answers a deal
+        // already replaced and is dropped (staleRefusal)
+        if (this.offloadRefused(from, e, d)) return;
+        if (this.staleRefusal(from, e, d)) return;
         if (this.hosting() && ai.chain.includes(from)) {
           this.failWaiters(new Error(`${e?.name || from}: ${d.message}`));
           if (d.load && ai.starting) ai.startErr?.(new Error(`${e?.name || from} couldn't load its layers (${d.message})`));
@@ -778,6 +825,37 @@ export class RoomNode extends EventEmitter {
         if (ai.askerId === from) ai.chatAbort?.abort();
         return;
     }
+  }
+
+  // A chain device refused the offload it was dealt (ai-error nodisk, or an older node's "no expert offload yet"): the
+  // first time, every deal from now on counts it without any offload (ai.noDisk, by name: it holds across a rejoin, until
+  // its user says yes to the disk tier: "pledge") and the room deals again now. -> true when handled (a re-deal is on)
+  offloadRefused(from, e, d) {
+    const ai = this.ai, nm = e?.name || from;
+    const oldNode = /has no expert offload yet/.test(String(d.message || ""));
+    if (!(d.nodisk || oldNode) || !this.hosting() || !ai.chain.includes(from) || ai.noDisk.has(nm)) return false;
+    ai.noDisk.add(nm);
+    const why = d.nodisk ? `${nm} keeps the model off its disk` : `${nm} can't offload this model's experts (an older pooled)`;
+    this.log(`${why}: dealing the layers again without its offload`);
+    this.failWaiters(new Error(`${nm}: ${d.message}`));
+    const again = `${why}: dealing the layers again`;
+    // a deal in progress ends and deals again once this device's own load is in (_start's readyAll); a room that was
+    // up deals again now
+    if (ai.starting) this.dealAgain(again);
+    else if (ai.model && !this.closing) this.redeal(again).catch((err) => { if (!err.short) this.log("re-deal failed: " + err.message); });
+    return true;
+  }
+
+  // A refusal from a device already in ai.noDisk answers a deal that is already being replaced: the deal after its
+  // first refusal, and every one since, counts it without any offload, so it has none of its own to refuse (an
+  // ai-error names no deal: a tab's disk question, shared by the deals it spans, can time out after a re-deal and
+  // answer each). Dropped, not a failed start: a re-deal without its offload is on or done. A device that says yes
+  // again ("pledge") leaves ai.noDisk, and a refusal after that is a first one again. -> true when dropped
+  staleRefusal(from, e, d) {
+    const ai = this.ai, nm = e?.name || from;
+    if (!(d.nodisk || /has no expert offload yet/.test(String(d.message || ""))) || !this.hosting() || !ai.chain.includes(from) || !ai.noDisk.has(nm)) return false;
+    this.log(`${nm} refused an offload from an earlier deal: this deal gives it none`);
+    return true;
   }
 
   // ---------------- worker (room.js ai-load + workerFrame) ----------------
@@ -819,7 +897,7 @@ export class RoomNode extends EventEmitter {
     // re-seated in its slot (the host link dropped and came back) with the same layers still on the
     // GPU: no reload, only a reset (room.js keeps them the same way)
     const keep = ai.engine && sameShard(ai.held, d) && ai.held.kv === kv;
-    if (ai.loadingShard && ai.loadKey === `${d.model}:${d.range}`) { ai.next = d.next; ai.hostId = d.host || from; this.ensureLink(d.next); return; }
+    if (ai.loadingShard && ai.loadKey === loadKey(d.model, d.range, d.flash)) { ai.next = d.next; ai.hostId = d.host || from; this.ensureLink(d.next); return; }
     if (ai.device && !keep) this.freeLayers(null);
     ai.role = "worker"; ai.next = d.next; ai.hostId = d.host || from; ai.q = Promise.resolve(); ai.startFailed = null;
     this.ensureLink(d.next);   // open the link to the chain neighbour while the weights load
@@ -832,14 +910,15 @@ export class RoomNode extends EventEmitter {
         this.log(`dealt layers ${d.range[0]}-${d.range[1] - 1} of ${d.model}; next: ${d.next}`);
         if (d.offload) this.log(`offloading the experts of layers ${d.offload.lo}-${d.offload.hi - 1} to RAM${Number.isInteger(d.offload.diskLo) ? ` (layers ${d.offload.diskLo}-${d.offload.hi - 1}: read from disk)` : ""} (${(d.offload.vramBytes / 2 ** 30).toFixed(1)} GB of GPU cache)`);
         let lastPct = -1;
-        ai.loadingShard = true; ai.loadKey = `${d.model}:${d.range}`;
+        ai.loadingShard = true; ai.loadKey = loadKey(d.model, d.range, d.flash);
         if (this.beforeLoad) await this.beforeLoad(d.model);
         if (ai.startFailed) throw new Error(ai.startFailed);
         const src = openModel(d.model, { modelDir: this.modelDir });
         const unwatch = this.watchLoad(src);
         try {
           const r = await this.loadShardFn({ modelKey: d.model, range: d.range, hasEmbed: false, hasHead: false, ctx: d.ctx || maxSeqFor(d.model),
-            kv, src, flags: this.flags, selfTest: this.selfTest, log: this.log, offload: this.offloadOk(d.offload),
+            kv, src, flags: this.flags, selfTest: this.selfTest, log: this.log, offload: this.offloadOk(d.offload), flash: d.flash || null,
+            pledgeBytes: this.meta ? pledgeGB(this.meta, Infinity, d.model) * 2 ** 30 : 0,
             onGpuError: (m) => { this.log("GPU error: " + m); this.sendTo(ai.hostId, { t: "ai-error", message: "GPU error: " + m.slice(0, 300) }); },
             onProgress: (done, total) => {
               if (ai.startFailed) throw new Error(ai.startFailed);
@@ -847,7 +926,7 @@ export class RoomNode extends EventEmitter {
               if (pct !== lastPct) { lastPct = pct; this.sendTo(ai.hostId, { t: "ai-progress", pct }); this.emit("loadprogress", pct); }
             } });
           Object.assign(ai, { engine: r.engine, device: r.device, cfg: r.cfg, range: d.range, model: d.model, experts: r.experts || null });
-          ai.held = { model: d.model, range: [d.range[0], d.range[1]], ctx: d.ctx, kv, offload: d.offload || null, file: this.disk ? await modelFileId(src) : null };
+          ai.held = { model: d.model, range: [d.range[0], d.range[1]], ctx: d.ctx, kv, offload: d.offload || null, flash: d.flash || null, file: this.disk ? await modelFileId(src) : null };
         } finally { unwatch(); await src.close(); }
       }
       if (!(await this.ensureLink(d.next))) throw new Error("could not connect to the next device in the chain");
@@ -856,7 +935,11 @@ export class RoomNode extends EventEmitter {
       // disk: what keys this device's disk copies (ckptdisk.js), for the host's room key
       ai.diskPend.clear();
       const disk = this.diskLocal();
-      this.sendTo(ai.hostId, { t: "ai-ready", slots: [], ckpt: ai.engine?.saveSlot ? 1 : 0, ...(disk ? { disk } : {}) });
+      // ctx, fsig: the positions this engine holds and (Flash) its state signature, so the host sees what was loaded;
+      // batch (Qwen3.8-Flash-Next): whether this device runs prompt frames in batched passes (room/flash.js), so the host
+      // can narrow its frames for one that does not (room/pipeline.js chainSlow). Older hosts ignore both
+      this.sendTo(ai.hostId, { t: "ai-ready", slots: [], ckpt: ai.engine?.saveSlot ? 1 : 0, ...(disk ? { disk } : {}), ...flashReadyFields(ai.engine, d.model),
+        ...(ai.engine?.batch !== undefined ? { batch: ai.engine.batch ? 1 : 0 } : {}) });
       this.emit("loaded", { range: d.range, model: d.model, s: (performance.now() - t0) / 1000 });
     } catch (err) {
       if (ai.startFailed) { this.freeLayers(null); return; }
@@ -897,6 +980,7 @@ export class RoomNode extends EventEmitter {
   teleNote(kind, ms, n = 1) {
     const ai = this.ai, T = this.tele ||= new TeleMeter();
     T.note(kind, ms, n, wireStats.lastMax || 0);
+    if (kind === "one" && ms > (+process.env.POOLED_SLOWFRAME || Infinity)) this.log(`slow frame: ${ms.toFixed(0)} ms for one token's layers`);   // (diagnostics)
     const now = performance.now();
     if (T.due(now) && ai.hostId) this.sendTo(ai.hostId, T.report(now, ai.experts || expertStoreOf(ai.engine)));
   }
@@ -963,10 +1047,10 @@ export class RoomNode extends EventEmitter {
   // holds besides), else the model's fallback when they hold it there (the 1.7B: 8k for 16k); an asked
   // --ctx stays. -> { ctx, want, fits, fellBack, note } (note: what the room says when it fell back)
   static ctxPick(modelKey, { want, ask = 0, kv = "f16", self, peers = [], shareCap = new Map() }) {
-    const pl = [self, ...peers].map((d) => pledgeGB(d.meta, shareCap.get(d.name), modelKey) * 2 ** 30);
+    const pl = [self, ...peers].map((d) => dealPledgeBytes(d.meta, shareCap.get(d.name), modelKey));
     const pick = pickCtx(modelKey, { want, ask, fitsAt: (c) => {
       const rb = roomBytes(modelKey, c, kv === "q8" ? "q8" : "f16");
-      return !rb || roomFit(rb.L, pl, rb.layerBytes, rb.hostBytes, offloadFor([self, ...peers].map((d) => d.meta), rb.experts || rb.expertBytes, modelKey)).fits;
+      return !rb || roomFit(rb.L, pl, rb.layerCost || rb.layerBytes, rb.hostBytes, offloadFor([self, ...peers].map((d) => d.meta), rb.experts || rb.expertBytes, modelKey)).fits;
     } });
     return { ...pick, note: pick.fellBack ? ctxShortNote(String(MODELS[modelKey]?.label || modelKey).split("·")[0].trim(), pick.ctx, pick.want) : "" };
   }
@@ -984,9 +1068,12 @@ export class RoomNode extends EventEmitter {
   // model: the model's key (a device's disk tier counts only for a model whose files it has: room/pledge.js diskFor)
   // ngram: the model's n-gram table (room/models.js ngramOf: Qwen3.8-Flash-Next),
   // or null: the device dealt its layer must have it on disk (room/plan.js placeNgram); the plan then has `ngram`.
-  static dealPlan({ L, layerBytes, embedBytes, self, peers, shareCap = new Map(), mode = "memory", fitBytes = null, expertBytes = 0, experts = null, model = null, ngram = null }) {
-    const pledgeOf = (m, name) => pledgeGB(m, shareCap.get(name), model) * 2 ** 30;   // (64 GB a device, 128 for Flash)
-    const per = fitBytes?.layerBytes || layerBytes, hostB = fitBytes ? fitBytes.hostBytes : embedBytes;
+  // layerCost (Qwen3.8-Flash-Next): each layer's own bytes at the room's context (room/models.js flashLayerCost, from
+  // the model's header), or fitBytes.layerCost (roomBytes' from SHAPE: the same numbers): the deal and needGB use them
+  static dealPlan({ L, layerBytes, layerCost = null, embedBytes, self, peers, shareCap = new Map(), mode = "memory", fitBytes = null, expertBytes = 0, experts = null, model = null, ngram = null }) {
+    const pledgeOf = (m, name) => dealPledgeBytes(m, shareCap.get(name), model);   // (64 GB a device, 128 for Flash)
+    const lc = layerCost || fitBytes?.layerCost || null;
+    const per = lc || fitBytes?.layerBytes || layerBytes, hostB = fitBytes ? fitBytes.hostBytes : embedBytes;
     const pledges = [pledgeOf(self.meta, self.name), ...peers.map((p) => pledgeOf(p.meta, p.name))];
     const off = offloadFor([self.meta, ...peers.map((p) => p.meta)], experts || expertBytes || fitBytes?.experts || fitBytes?.expertBytes || 0, model);
     // phones hold layers only when the computers cannot hold the model (room/plan.js); speed: fill
@@ -994,7 +1081,8 @@ export class RoomNode extends EventEmitter {
     // pledge is under one layer) joins without layers
     const deal = dealRoom({ L, layerBytes: per, hostBytes: hostB, pledges, mode: mode === "speed" ? "speed" : "memory",
       phone: [false, ...peers.map((p) => isPhoneMeta(p.meta))], off, ngram: ngramFor([self.meta, ...peers.map((p) => p.meta)], ngram) });
-    const needGB = (L * layerBytes + embedBytes) / 2 ** 30, haveGB = pledges.reduce((s, b) => s + b, 0) / 2 ** 30;
+    // haveGB: what the devices pledged, as they said it (the deal itself keeps room/pledge.js dealPledgeBytes' reserve back)
+    const needGB = ((layerCost ? layersTotal(layerCost, L) : L * layerBytes) + embedBytes) / 2 ** 30, haveGB = [self, ...peers].reduce((s, d) => s + pledgeGB(d.meta, shareCap.get(d.name), model), 0);
     if (!deal.fit.fits || !deal.used.length) return { chain: [], ranges: [], assigned: [], leftOut: [], fit: deal.fit, needGB, haveGB };
     const chain = deal.used.slice(1).map((i) => peers[i - 1].id);
     const leftOut = peers.map((p) => p.id).filter((id) => !chain.includes(id));
@@ -1014,11 +1102,11 @@ export class RoomNode extends EventEmitter {
         await new Promise((r) => setTimeout(r, 250));
       }
     }
-    ai.starting = true; ai.degraded = false; ai.readyPeers = new Set(); ai.model = modelKey; ai.online = false;
+    ai.starting = true; ai.degraded = false; ai.readyPeers = new Set(); ai.batchOf = new Map(); ai.model = modelKey; ai.online = false;
     ai.short = null; ai.startOk = ai.startErr = null;   // (this deal's, once its devices are dealt: dealAgain)
     // a fresh deal: every device starts without checkpoints (a worker that keeps its layers drops its
     // slots); what each worker applies comes with its ai-ready, which may arrive before this device's load ends
-    ai.ckpt?.clear(); ai.dropQ = []; ai.ckptCap = new Map();
+    ai.ckpt?.clear(); ai.dropQ = []; ai.ckptCap = new Map(); ai.readyInfo = new Map();
     // and, once every device is in, the pinned prefixes this room saved to disk before (diskRestore)
     ai.diskOf = new Map(); ai.diskRoom = null; ai.dealGen++; ai.diskRestore = !!this.disk;
     ai.relinks = new Map(); ai.gone = new Set(); ai.plan = new Map(); ai.lapStat = null;
@@ -1026,7 +1114,7 @@ export class RoomNode extends EventEmitter {
     const kv = kvModeFor(modelKey, null);
     ai.apiCache = new AnswerCache(8); ai.apiTurns.clear(); ai.apiEnc.clear(); ai.apiProf = null; ai.apiTT = null; ai.bounds.clear();
     const src = (this.openSource || openModel)(modelKey, { modelDir: this.modelDir });   // (tests stub openSource)
-    let L, layerBytes, embedBytes, experts = null;
+    let L, layerBytes, embedBytes, experts = null, flashG = null;
     try {
       if (M.kind === "qwen35") {
         const G = await src.header(false);
@@ -1039,13 +1127,13 @@ export class RoomNode extends EventEmitter {
         embedBytes = (G.tensors[GGML_EMBED]?.byteLength || 0) + (G.tensors[GGML_OUTPUT]?.byteLength || 0) + qwen35MtpBytes(G);
         experts = expertsOf(G, L);   // what each layer's routed experts park (null for a dense model): ExpertStore's sizes
       } else if (M.kind === "qwen4exp") {
-        // Qwen3.8-Flash-Next: the dense phase (no QSA indexer), K / V in f32 on its attention layers (averaged over all
-        // of them), the embedding and the head's HC mixer + output.weight on the host; no expert offload yet
-        const G = await src.header(false), c = qwen4expConfig(G.meta);
-        L = c.L;
-        const kvPos = 2 * c.nKVHeads * c.headDim * 4 * c.qsa.filter(Boolean).length / L;
-        layerBytes = qwen4expShardBytes(G, { lo: 0, hi: 4, hasEmbed: false, hasHead: false, qsa: false }) / 4 + ctx * kvPos;
+        // Qwen3.8-Flash-Next: each layer's own bytes at the room's context (room/models.js flashLayerCost), sized below
+        // once the context is picked (so needGB, ai.layerGB and the deal are at the context the room opens with), the
+        // embedding and the head's HC mixer + output.weight on the host
+        const G = flashG = await src.header(false);
+        L = qwen4expConfig(G.meta).L;
         embedBytes = qwen4expShardBytes(G, { lo: 0, hi: 0, hasEmbed: true, hasHead: true, qsa: false });
+        experts = expertsOf(G, L);   // expert offload (shard.js loadFlash): parked in RAM, read from disk (--disk), or a tab's OPFS
       } else {
         L = (await src.cfg()).num_hidden_layers;
         const G = await src.header(false);
@@ -1056,7 +1144,9 @@ export class RoomNode extends EventEmitter {
     const nameOf = (id) => this.conns.get(id)?.name || id;
     if (this.expertDisk && this.meta) this.meta.local = localModels(this.modelDir);   // (a model pulled since this device opened)
     ai.dealtPeers = new Set(this.gpuPeers());   // every device this deal saw, left out or not (for a --devices host's re-deal)
-    const peers = this.gpuPeers().sort().filter((id) => !ai.dropped.has(nameOf(id))).map((id) => ({ id, name: nameOf(id), meta: this.conns.get(id)?.meta }));
+    // (a device that refused the offload it was dealt, ai.noDisk: counted without any, no disk tier, nothing parked)
+    const metaOf = (id) => { const m = this.conns.get(id)?.meta; if (!m || !ai.noDisk.has(nameOf(id))) return m; const { tabDisk, offload, ramGB, ...rest } = m; return rest; };
+    const peers = this.gpuPeers().sort().filter((id) => !ai.dropped.has(nameOf(id))).map((id) => ({ id, name: nameOf(id), meta: metaOf(id) }));
     // the model's default context, or its fallback (the 1.7B: 8k for 16k) when only that fits the
     // room's pledges (room/models.js pickCtx, the room page's rule); an asked --ctx stays as asked
     const pick = RoomNode.ctxPick(modelKey, { want: ctx, ask: this.ctxAsk, kv, self: { name: this.name, meta: this.meta }, peers, shareCap: ai.shareCap });
@@ -1064,7 +1154,9 @@ export class RoomNode extends EventEmitter {
     ai.ctxWant = pick.fellBack ? pick.want : 0;
     ai.ctxNote = pick.note;
     if (ai.ctxNote) this.log(ai.ctxNote);
-    const plan = RoomNode.dealPlan({ L, layerBytes, embedBytes, self: { name: this.name, meta: this.meta }, peers, shareCap: ai.shareCap, mode: this.splitMode,
+    const layerCost = flashG ? flashLayerCost(flashG, ctx) : null;
+    if (layerCost) layerBytes = layersTotal(layerCost, L) / L;   // (their average: ai.layerGB)
+    const plan = RoomNode.dealPlan({ L, layerBytes, layerCost, embedBytes, self: { name: this.name, meta: this.meta }, peers, shareCap: ai.shareCap, mode: this.splitMode,
       fitBytes: roomBytes(modelKey, ctx, kv === "q8" ? "q8" : "f16"), experts, model: modelKey, ngram: ngramOf(modelKey) });
     if (!plan.fit.fits) {
       // short: the room stops instead of dealing past a pledge (a re-deal after a device left that the
@@ -1091,19 +1183,23 @@ export class RoomNode extends EventEmitter {
     if (dealOffloads(ai.offloadBy)) this.log(specWithOffload(true, this.offloadSpec) ? "speculative decoding stays on with expert offload (POOLED_OFFLOAD_SPEC=1)"
       : "speculative decoding is off while experts are offloaded: plain decoding is faster there (POOLED_OFFLOAD_SPEC=1 turns it on)");
     this.split = { L, ranges, names: [this.name, ...ai.chain.map(nameOf)] };
+    // Qwen3.8-Flash-Next's format (ai-load.flash): QSA when every dealt device loads it (meta.flashLong), else none
+    const flash = flashRoomFormat(modelKey, [this.meta, ...ai.chain.map(metaOf)]);
+    ai.roomCtx = ctx; ai.roomFlash = flash;
+    if (M.kind === "qwen4exp") this.log(flash ? `Qwen3.8-Flash-Next with QSA (${flash.kv} K/V, ring ${flash.ring}) at ${ctx} positions` : `Qwen3.8-Flash-Next dense at ${ctx} positions (a device here loads no QSA: an older build)`);
     const readyAll = new Promise((res, rej) => { ai.startOk = res; ai.startErr = rej; });
     readyAll.catch(() => {});
     if (ai.redealWanted) { ai.startErr(ai.redealWanted); ai.redealWanted = null; }
     ai.chain.forEach((id, i) => {
       const msg = { t: "ai-load", v: PROTOCOL, model: modelKey, range: ranges[i + 1], ctx, kv, next: i + 1 < ai.chain.length ? ai.chain[i + 1] : "host", host: this.peer.id,
-        ...(plan.offload[i + 1] ? { offload: offloadMsg(plan.offload[i + 1]) } : {}) };
+        ...(plan.offload[i + 1] ? { offload: withReserve(offloadMsg(plan.offload[i + 1]), modelKey) } : {}), ...(flash ? { flash } : {}) };
       ai.plan.set(nameOf(id), { msg });
       this.sendTo(id, msg);
     });
     this.broadcast({ t: "ai-layers", by: ai.layersByName });
     const t0 = performance.now();
-    const myOff = plan.offload[0] ? offloadMsg(plan.offload[0]) : null;
-    const keep = ai.engine && sameShard(ai.held, { model: modelKey, range: ranges[0], ctx, offload: myOff }) && ai.held.kv === kv;
+    const myOff = plan.offload[0] ? withReserve(offloadMsg(plan.offload[0]), modelKey) : null;
+    const keep = ai.engine && sameShard(ai.held, { model: modelKey, range: ranges[0], ctx, offload: myOff, flash }) && ai.held.kv === kv;
     let unwatch = () => {};
     try {
       if (!keep) {
@@ -1111,11 +1207,12 @@ export class RoomNode extends EventEmitter {
         ai.loadingShard = true;
         let lastPct = -1;
         unwatch = this.watchLoad(src);
-        const r = await this.loadShardFn({ modelKey, range: ranges[0], hasEmbed: true, hasHead: true, ctx, kv, src, flags: this.flags, selfTest: this.selfTest, log: this.log, offload: this.offloadOk(myOff),
+        const r = await this.loadShardFn({ modelKey, range: ranges[0], hasEmbed: true, hasHead: true, ctx, kv, src, flags: this.flags, selfTest: this.selfTest, log: this.log, offload: this.offloadOk(myOff), flash,
+          pledgeBytes: this.meta ? pledgeGB(this.meta, ai.shareCap.get(this.name), modelKey) * 2 ** 30 : 0,
           onGpuError: (m) => this.log("GPU error: " + m),
           onProgress: (done, total) => { const pct = Math.round(total ? (done / total) * 100 : 0); if (pct !== lastPct) { lastPct = pct; this.emit("loadprogress", pct); } } });
         Object.assign(ai, { engine: r.engine, device: r.device, tok: r.tok, cfg: r.cfg, range: ranges[0], role: "host", experts: r.experts || null });
-        ai.held = { model: modelKey, range: [ranges[0][0], ranges[0][1]], ctx, kv, offload: myOff, file: this.disk ? await modelFileId(src) : null };
+        ai.held = { model: modelKey, range: [ranges[0][0], ranges[0][1]], ctx, kv, offload: myOff, flash, file: this.disk ? await modelFileId(src) : null };
       }
     } catch (err) { ai.starting = false; ai.redealWanted = null; clearTimeout(ai.idleRedeal); this.broadcast({ t: "ai-start-failed", why: err.message }); throw err; }
     finally { unwatch(); ai.loadingShard = false; await src.close(); }
@@ -1182,6 +1279,15 @@ export class RoomNode extends EventEmitter {
     if (this.isHost) { this.broadcast({ t: "pledge", gb: v }); this.emit("members"); }
     else if (this.ai.hostId && this.conns.has(this.ai.hostId)) this.sendTo(this.ai.hostId, { t: "pledge", gb: v });
     return v;
+  }
+  // the disk tier's models changed (pooled join downloaded the room's model after it joined): tell the host, whose next
+  // deal may then leave some of that model's experts in the files here (meta.local, room/pledge.js diskFor)
+  announceLocal() {
+    if (!this.expertDisk || !this.meta) return false;
+    this.meta.local = localModels(this.modelDir);
+    if (this.isHost) return true;
+    if (this.ai.hostId && this.conns.has(this.ai.hostId)) this.sendTo(this.ai.hostId, { t: "pledge", gb: this.pledgeGB || this.meta.contribGB, local: this.meta.local });
+    return true;
   }
   ctxMax() { return this.ai.engine?.maxSeq || nodeCtxFor(this.ai.model || "qwen3-1.7b", this.ctxAsk); }
   // v2 asks (tools): the loaded model's template profile and token texts (room.js apiProfile / apiTokenTexts)
@@ -1380,7 +1486,9 @@ export class RoomNode extends EventEmitter {
   diskLocal() {
     const ai = this.ai, E = ai.engine;
     if (!this.disk || !E?.stateSignature || !E.exportSlot || !E.importState || !ai.held?.file || !ai.model) return null;
-    return { model: ai.model, file: ai.held.file, sig: E.stateSignature(), ctx: E.maxSeq || ai.held.ctx || 0, kv: ai.held.kv || "f16" };
+    // kv: Flash (arch qwen4exp) reports its engine's real KV format (its signature's); the room's KV ask is a Qwen 3.5 one
+    const sig = E.stateSignature();
+    return { model: ai.model, file: ai.held.file, sig, ctx: E.maxSeq || ai.held.ctx || 0, kv: (sig.arch === "qwen4exp" && sig.kv) || ai.held.kv || "f16" };
   }
   // The room key: the model, context and KV mode and every device's file and state signature, host
   // first, in chain order (a worker's state depends on what every device before it computed). null

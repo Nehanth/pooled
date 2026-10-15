@@ -10,7 +10,8 @@ import { parseGGUFHeader, qwen4expConfig, qwen4expLayerNames, qwen4expNamesFor, 
   qwen4expWeights, qwen4expShardBytes, qwen4expMtpBytes, entryByteLength, ggufEntry, QWEN4EXP_HEAD,
   GGML_EMBED, GGML_OUTPUT, GGML_PLE_TABLE, GGML_F32, GGML_F16, GGML_BF16, GGML_Q4_0, GGML_Q4_1, GGML_Q5_0, GGML_Q6_K,
   GGML_Q8_0 } from "../../engine/gguf.js";
-import { mergeSplitHeaders } from "../../room/models.js";
+import { mergeSplitHeaders, ngramOf } from "../../room/models.js";
+import { ngramLayerIn } from "../../room/model-loader.js";
 import { readFixture, ggufFromFixture } from "../helpers/gguf_fixture.js";
 
 const eq = (a, b, m = "") => { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${m} ${JSON.stringify(a)} != ${JSON.stringify(b)}`); };
@@ -305,6 +306,21 @@ test("qwen4expWeights: layers 0-3 with experts parked on 2-3, the n-gram layer a
   ok(!W2.pleTable && !W2.embed, "no table or embedding past the n-gram layer");
 });
 
+// The loader sizes the n-gram table's save step (and copies the table before the GPU step) from ngramLayerIn, before
+// any weight is read; the table's reader comes from qwen4expWeights' pleTable after. They must agree on every range, and
+// with the deal's own idea of where the table is (room/models.js ngramOf, room/plan.js dealRoom ngram)
+test("ngramLayerIn: true exactly for the ranges qwen4expWeights returns the table for, and the deal's layer", async () => {
+  const { G } = headers();
+  const c = qwen4expConfig(G.meta);
+  ok(c.ple.layers.includes(ngramOf("qwen3.8-flash").layer), "the deal's n-gram layer is the header's PLE layer");
+  for (const [lo, hi] of [[0, 1], [0, 2], [1, 2], [1, 48], [2, 48], [0, 48], [24, 48], [2, 3]]) {
+    const W = await qwen4expWeights(G, stubbed(G, []), { lo, hi });
+    eq([lo, hi, ngramLayerIn(c, [lo, hi])], [lo, hi, !!W.pleTable]);
+    eq([lo, hi, ngramLayerIn(c, [lo, hi])], [lo, hi, lo <= ngramOf("qwen3.8-flash").layer && ngramOf("qwen3.8-flash").layer < hi]);
+  }
+  ok(!ngramLayerIn(null, [0, 48]) && !ngramLayerIn({ ple: null }, [0, 48]), "no PLE: no table");
+});
+
 test("qwen4expWeights: the head and the MTP block from its own file", async () => {
   const { G, Gm } = headers();
   const log = [], mlog = [];
@@ -361,4 +377,14 @@ test("qwen4expWeights: the MTP file uses its own hooks (G.convert by default), a
   Gm.entryCache = { get: async (info) => { mcached.push(info.name); return null; }, put: async () => {} };
   await qwen4expWeights(G, async () => new Uint8Array(0), { lo: 0, hi: 0, hasHead: true, mtp: Gm, mtpBytesOf: mread });
   ok(mcached.includes("blk.48.nextn.eh_proj.weight"), "the MTP header's own cache");
+});
+
+test("SHAPE: the picker's layer and expert sizes are the ones Start measures from the header (room.js aiStart)", async () => {
+  const { SHAPE, expertsOf } = await import("../../room/models.js");
+  const { G } = headers(), S = SHAPE["qwen3.8-flash"];
+  // aiStart: layerAt = qwen4expShardBytes over layers 0-3 without the indexer, / 4; experts = expertsOf(G, L)
+  eq(S.layer, qwen4expShardBytes(G, { lo: 0, hi: 4, hasEmbed: false, hasHead: false, qsa: false }) / 4, "layer");
+  eq(S.exp, expertsOf(G, LAYERS).E, "exp");
+  // so the part a disk tier keeps on the GPU (layer - exp) is the file's, not ~10 MB
+  ok(S.layer - S.exp > 50e6, `layer - exp ${S.layer - S.exp}`);
 });

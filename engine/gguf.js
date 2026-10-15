@@ -158,22 +158,27 @@ export function q8Repack(info, bytes) {
   const nb = n / QK8_0;
   const qs = new Uint8Array(n);
   const scales = new Uint32Array(Math.ceil(nb / 2));   // raw f16 scales, 2 per word
-  const sc16 = new Uint16Array(scales.buffer);
-  if ((bytes.byteOffset & 1) === 0) {
+  q8RepackInto(bytes, qs, new Uint16Array(scales.buffer), 0, nb);
+  return { qs, scales };
+}
+// q8Repack's loop for blocks [b0, b1) of `bytes` (the tensor's file bytes from its start) into qs (n bytes) and sc16
+// (a u16 per block), each from the tensor's start: what a worker thread runs on its share of the blocks
+// (packages/room-node/convert.js, all three in shared memory)
+export function q8RepackInto(bytes, qs, sc16, b0, b1) {
+  if (((bytes.byteOffset | qs.byteOffset) & 1) === 0) {
     // 34-byte blocks keep 2-byte alignment: move u16 words (3x faster than subarray+set per block)
-    const src = new Uint16Array(bytes.buffer, bytes.byteOffset, nb * 17), dst = new Uint16Array(qs.buffer);
-    for (let b = 0, s = 0, d = 0; b < nb; b++, s += 17, d += 16) {
+    const src = new Uint16Array(bytes.buffer, bytes.byteOffset, b1 * 17), dst = new Uint16Array(qs.buffer, qs.byteOffset, b1 * 16);
+    for (let b = b0, s = b0 * 17, d = b0 * 16; b < b1; b++, s += 17, d += 16) {
       sc16[b] = src[s];
       for (let j = 0; j < 16; j++) dst[d + j] = src[s + 1 + j];
     }
-    return { qs, scales };
+    return;
   }
-  for (let b = 0; b < nb; b++) {
+  for (let b = b0; b < b1; b++) {
     const base = b * Q8_0_BLOCK_BYTES;
     sc16[b] = bytes[base] | (bytes[base + 1] << 8);
     qs.set(bytes.subarray(base + 2, base + 2 + QK8_0), b * QK8_0);
   }
-  return { qs, scales };
 }
 
 // map ggml tensor names -> the engine's internal names for llama/qwen-family models
@@ -256,6 +261,7 @@ export function requantQ8Streaming(info, bytes) {
   const qs = new Uint8Array(n);
   const scales = new Uint32Array(Math.ceil(n / 32 / 2));
   const sc16 = new Uint16Array(scales.buffer);
+  if (info.ggmlType === GGML_Q4_1 && n % 32 === 0) { q41ToQ8(bytes, n / 32, qs, sc16); return { qs, scales }; }
   const CH = Math.max(1, Math.floor((8 * 2 ** 20) / (cols * 4))); // ~8MB f32 per chunk
   for (let r0 = 0; r0 < rows; r0 += CH) {
     const rc = Math.min(CH, rows - r0);
@@ -268,6 +274,41 @@ export function requantQ8Streaming(info, bytes) {
     sc16.set(new Uint16Array(q.scales.buffer, 0, nbChunk), (r0 * cols) / 32);
   }
   return { qs, scales };
+}
+
+// Q4_1 -> Q8 in one pass, byte for byte what dequantF32 + quantizeQ8 give (tests/unit/quant_test.js checks it): a
+// Q4_1 block has only 16 distinct values, fround(d * k + m) for k = 0..15 (dequantF32's f32 store), so each is
+// divided and rounded once instead of 32 times, and nothing goes through an f32 array. Flash's down experts are Q4_1:
+// the old path converted them at ~62 MB/s on one core (GB10), the main thread's wall in a tab's first save.
+let _f16tab = null;   // every f16 bit pattern -> its value (f16ToF32's, exact in an f64)
+const _q41v = new Float64Array(16), _q41q = new Uint8Array(16);
+function q41ToQ8(bytes, nb, qs, sc16) {
+  const T = _f16tab ||= Float64Array.from({ length: 65536 }, (_, h) => f16ToF32(h));
+  const v = _q41v, qv = _q41q;
+  for (let b = 0; b < nb; b++) {
+    const base = b * 20, o = b * 32;
+    const d = T[bytes[base] | (bytes[base + 1] << 8)], m = T[bytes[base + 2] | (bytes[base + 3] << 8)];
+    if (!Number.isFinite(d) || !Number.isFinite(m)) {   // an inf / NaN scale: the reference path, for its NaN rules
+      const q = quantizeQ8(dequantF32({ ggmlType: GGML_Q4_1, nElems: 32 }, bytes.subarray(base, base + 20)));
+      qs.set(q.qs, o); sc16[b] = q.scales[0] & 0xFFFF;
+      continue;
+    }
+    for (let k = 0; k < 16; k++) v[k] = Math.fround(d * k + m);
+    // the largest |value| among the nibbles used (finite here: no NaN to propagate)
+    let used = 0;
+    for (let l = 0; l < 16; l++) { const q = bytes[base + 4 + l]; used |= (1 << (q & 0xF)) | (1 << (q >> 4)); }
+    let amax = 0;
+    for (let k = 0; k < 16; k++) if (used & (1 << k)) { const a = Math.abs(v[k]); if (a > amax) amax = a; }
+    const h = f32ToF16(amax / 127 || 1);
+    sc16[b] = h;
+    const dd = T[h] || 1;
+    for (let k = 0; k < 16; k++) { const r = Math.round(v[k] / dd); qv[k] = (r > 127 ? 127 : r < -127 ? -127 : r) & 0xFF; }
+    for (let l = 0; l < 16; l++) {
+      const q = bytes[base + 4 + l];
+      qs[o + l] = qv[q & 0xF];
+      qs[o + l + 16] = qv[q >> 4];
+    }
+  }
 }
 
 export async function ggufWeights(G, bytesOf, { lo, hi, hasEmbed, hasHead }, onProgress = () => {}, onEntry = null) {
@@ -456,24 +497,27 @@ export function q4Repack(info, bytes) {
   const nb = n / 32;
   const qs = new Uint8Array(n / 2);
   const scales = new Uint32Array(Math.ceil(nb / 2));   // raw f16 scales, 2 per word
-  const sc16 = new Uint16Array(scales.buffer);
-  if ((bytes.byteOffset & 1) === 0) {
+  q4RepackInto(bytes, qs, new Uint16Array(scales.buffer), 0, nb);
+  return { qs, scales };
+}
+// q4Repack's loop for blocks [b0, b1) (as q8RepackInto: qs holds 16 bytes a block)
+export function q4RepackInto(bytes, qs, sc16, b0, b1) {
+  if (((bytes.byteOffset | qs.byteOffset) & 1) === 0) {
     // 18-byte blocks keep 2-byte alignment: move u16 words (3x faster than subarray+set per block;
     // this loop is most of a cold 27B load)
-    const src = new Uint16Array(bytes.buffer, bytes.byteOffset, nb * 9), dst = new Uint16Array(qs.buffer);
-    for (let b = 0, s = 0, d = 0; b < nb; b++, s += 9, d += 8) {
+    const src = new Uint16Array(bytes.buffer, bytes.byteOffset, b1 * 9), dst = new Uint16Array(qs.buffer, qs.byteOffset, b1 * 8);
+    for (let b = b0, s = b0 * 9, d = b0 * 8; b < b1; b++, s += 9, d += 8) {
       sc16[b] = src[s];
       dst[d] = src[s + 1]; dst[d + 1] = src[s + 2]; dst[d + 2] = src[s + 3]; dst[d + 3] = src[s + 4];
       dst[d + 4] = src[s + 5]; dst[d + 5] = src[s + 6]; dst[d + 6] = src[s + 7]; dst[d + 7] = src[s + 8];
     }
-    return { qs, scales };
+    return;
   }
-  for (let b = 0; b < nb; b++) {
+  for (let b = b0; b < b1; b++) {
     const base = b * 18;
     sc16[b] = bytes[base] | (bytes[base + 1] << 8);
     qs.set(bytes.subarray(base + 2, base + 18), b * 16);
   }
-  return { qs, scales };
 }
 
 // Quantize f32 -> Q8_0-style GPU entry (for K-quant tensors we don't have GPU

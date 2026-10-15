@@ -397,13 +397,67 @@ test("explainError: a room short of a model is not a GPU out of memory (\"rOOM\"
 test("--disk: parsed on join and host; on only where expert offload is, with RAM for its cache", async () => {
   const { diskRule, DISK_RAM_MIN_GB } = await import("../lib/lend.js");
   assert.equal(parseLendArgs("join", ["ABCD", "--disk"]).disk, true);
-  assert.equal(parseLendArgs("join", ["ABCD"]).disk, false);
+  assert.equal(parseLendArgs("join", ["ABCD"]).disk, null, "pooled join decides by itself");
+  assert.equal(parseLendArgs("join", ["ABCD", "--no-disk"]).disk, false);
+  assert.equal(parseLendArgs("host", ["qwen3.6-35b-moe"]).disk, false, "pooled host: off unless --disk");
+  assert.throws(() => parseLendArgs("join", ["ABCD", "--disk", "--no-disk"]), /pick one/);
   assert.equal(parseLendArgs("host", ["qwen3.6-35b-moe", "--here", "--disk", "--ram", "8"]).disk, true);
   const pc = { kind: "discrete", name: "RTX 5070", totalGB: 12 };
   assert.deepEqual(diskRule(pc, false, { gb: 24 }), { on: false, why: "" });
-  assert.deepEqual(diskRule(pc, true, { gb: 24, why: "--ram 24" }), { on: true, why: "--disk" });
+  assert.deepEqual(diskRule(pc, true, { gb: 24, why: "--ram 24" }), { on: true, auto: false, why: "--disk" });
   assert.match(diskRule({ kind: "unified" }, true, { gb: 0 }).why, /not on unified memory/);
   assert.match(diskRule(pc, true, { gb: 0, why: "--ram 0" }).why, /needs RAM for expert offload \(--ram 0\)/);
   assert.match(diskRule(pc, true, { gb: DISK_RAM_MIN_GB - 1 }).why, new RegExp(`at least ${DISK_RAM_MIN_GB} GB`));
   for (const h of [HELP_JOIN, HELP_HOST]) assert.match(h, /--disk/);
+});
+
+test("pooled join with no flags: lends by the rules, offers the disk tier, prints one plain line", async () => {
+  const { diskRule, pullPlan, autoLine, LEND_MAX_GB, AUTO_PULL_MAX_GB, DISK_KEEP_GB } = await import("../lib/lend.js");
+  const G = 1e9;
+  // the RTX 5070 PC of the demo: 12 GB (11.4 free with the desktop), 64 GB of RAM, 47 GB free
+  const pc = { kind: "discrete", name: "NVIDIA GeForce RTX 5070", totalGB: 11.94, freeGB: 11.4 };
+  const rule = memoryRule(pc, null, { autoCapGB: LEND_MAX_GB });
+  assert.equal(rule.gb, 9.5);
+  const ram = ramRule(pc, null, { totalGB: 63.6, freeGB: 47 });
+  assert.equal(ram.gb, 43, "free less 4: the demo's --ram 43");
+  const disk = diskRule(pc, null, ram);
+  assert.equal(disk.on, true); assert.equal(disk.auto, true);
+  // not offered where it can't be, and quietly (no error line)
+  assert.deepEqual(diskRule(pc, null, { gb: 1 }), { on: false, auto: true, why: "" });
+  assert.deepEqual(diskRule({ kind: "unified" }, null, { gb: 0 }), { on: false, auto: true, why: "" });
+  // the model's files: here, downloadable, too big to wait for, no room on the disk
+  assert.equal(pullPlan({ st: { pulled: true } }).local, true);
+  assert.equal(pullPlan({ st: { pulled: false }, bytes: 21 * G, freeBytes: 500 * G }).pull, true);
+  const big = pullPlan({ st: { pulled: false }, bytes: 100.6 * G, freeBytes: 500 * G, key: "qwen3.8-flash" });
+  assert.equal(big.pull, false); assert.match(big.why, /pooled pull qwen3\.8-flash/);
+  assert.equal(pullPlan({ st: { pulled: false }, bytes: 100.6 * G, freeBytes: 500 * G, pull: true }).pull, true, "--pull: any size");
+  const full = pullPlan({ st: { pulled: false }, bytes: 21 * G, freeBytes: (21 + DISK_KEEP_GB - 1) * G });
+  assert.equal(full.pull, false); assert.match(full.why, /GB free on disk/);
+  assert.equal(pullPlan({ st: { pulled: false }, bytes: 21 * G, freeBytes: 500 * G, noPull: true }).pull, false);
+  assert.ok(AUTO_PULL_MAX_GB >= 21, "the 35B still downloads by itself");
+  const line = autoLine({ rule, ram, disk, mem: pc, model: { label: "Qwen3.8 Flash Next", moe: true, plan: { local: true } } });
+  assert.equal(line, "Lending 9.5 GB of GPU memory (11.4 GB free, 1.5 GB kept free) and 43 GB of RAM for experts (what is free now, less 4 GB); reading from the model files on this computer (experts too, if RAM runs short). Change with --gb / --ram / --no-disk.");
+  // a dense model: no RAM in the line
+  assert.doesNotMatch(autoLine({ rule, ram, disk, mem: pc, model: { label: "Qwen3 1.7B", moe: false, plan: { local: true } } }), /RAM/);
+  // a Mac Studio (unified, 128 GB): no RAM offload or disk tier; past 64 GB, since a Flash room may take it
+  const mac = { kind: "unified", name: "Apple silicon", totalGB: 128 };
+  const mr = memoryRule(mac, null, { autoCapGB: LEND_MAX_GB });
+  assert.equal(mr.gb, 83);
+  const mram = ramRule(mac, null, { totalGB: 128, freeGB: 100 });
+  const ml = autoLine({ rule: mr, ram: mram, disk: diskRule(mac, null, mram), mem: mac, model: { label: "Qwen3.8 Flash Next", moe: true, plan: { pull: false, why: "100.6 GB is too big to download before loading; pooled pull qwen3.8-flash keeps it here" } } });
+  assert.match(ml, /^Lending 83 GB of unified memory \(of 128 GB, the rest kept for the system\); streaming/);
+  assert.match(ml, /Change with --gb\.$/, "unified memory: --ram and --disk do nothing there");
+  // RAM: a big machine keeps a quarter; a 16 GB laptop parks nothing
+  assert.equal(ramRule(pc, null, { totalGB: 128, freeGB: 120 }).gb, 64);
+  assert.equal(ramRule(pc, null, { totalGB: 80, freeGB: 76 }).gb, 60, "80 GB keeps 20");
+  assert.equal(ramRule(pc, null, { totalGB: 32, freeGB: 28 }).gb, 16);
+  assert.equal(ramRule(pc, null, { totalGB: 16, freeGB: 12 }).gb, 0);
+});
+
+test("pooled join: --pull, --no-pull, --dry-run", () => {
+  assert.equal(parseLendArgs("join", ["ABCD", "--pull"]).pull, true);
+  assert.throws(() => parseLendArgs("join", ["ABCD", "--pull", "--no-pull"]), /pick one/);
+  const d = parseLendArgs("join", ["--dry-run"]);
+  assert.equal(d.dryRun, true); assert.equal(d.askCode, false);
+  assert.throws(() => parseLendArgs("host", ["--dry-run"]));
 });

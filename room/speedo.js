@@ -13,6 +13,35 @@ export function fmtTps(v) {
   return v >= 100 ? String(Math.round(v)) : v.toFixed(1);
 }
 
+// The speed in words, for the panel (the tok/s number stays in its tooltip): about 0.75 words a token in English text.
+// wordsPerSec(tps) -> words a second; speedWords(tps) -> "about 3 words a second" ("" without a speed)
+export const WORDS_PER_TOKEN = 0.75;
+export const wordsPerSec = (tps) => (+tps > 0 && Number.isFinite(+tps) ? +tps * WORDS_PER_TOKEN : 0);
+export function speedWords(tps) {
+  const w = wordsPerSec(tps);
+  if (!(w > 0)) return "";
+  if (w < 0.75) return "less than a word a second";
+  const n = Math.max(1, Math.round(w));
+  return `about ${n} word${n === 1 ? "" : "s"} a second`;
+}
+// the readout's line: live "Writing about 3 words a second"; after an answer "Last answer: about 3 words a second on
+// 2 devices"; "" without a speed (the panel shows nothing rather than a dash)
+export function speedLine(tps, { live = false, devices = 0 } = {}) {
+  const w = speedWords(tps);
+  if (!w) return "";
+  if (live) return `Writing ${w}`;
+  return `Last answer: ${w}` + (devices > 0 ? ` on ${devices} device${devices === 1 ? "" : "s"}` : "");
+}
+
+// The band head's one calm line, from the last real answer ({ tps, devices }, two tokens or more): "Last answer: about
+// 3 words a second" (" on 2 devices" with more than one); "" before there is one. Never a live number: while an answer
+// is written the band's pill says "Reading…" / "Writing…".
+export function bandLine(last) {
+  if (!last || !(+last.tps > 0)) return "";
+  const n = +last.devices || 0;
+  return speedLine(+last.tps, { devices: n > 1 ? n : 0 });
+}
+
 // an answer's stats line -> { count, tps, devices }; null for one without a speed ("failed: ...", a note)
 export function parseStats(stats) {
   const s = String(stats || "");
@@ -48,8 +77,8 @@ export class SpeedMeter {
   end() { this.on = false; return this.average(); }
 }
 
-// the history of answers, newest last, at most `max`: { key, tps, devices }; an answer shown again (a
-// reloaded tab replays the conversation) keeps its one entry
+// the history of answers, newest last, at most `max`: { key, tps, devices, warm?, model? } (warm: one of the first
+// answers after a load, warmupAnswers); an answer shown again (a reloaded tab replays the conversation) keeps its one entry
 export function pushHistory(hist, entry, max = 16) {
   if (!entry || !(entry.tps > 0)) return hist;
   const out = entry.key != null ? hist.filter((h) => h.key !== entry.key) : hist.slice();
@@ -58,24 +87,33 @@ export function pushHistory(hist, entry, max = 16) {
 }
 
 const median = (a) => { const s = [...a].sort((x, y) => x - y), k = s.length >> 1; return s.length % 2 ? s[k] : (s[k - 1] + s[k]) / 2; };
-// The change since the device count changed: the median of the newest run of answers with the same count
-// against the run before it. { x, from, to } (x = new / old) or null with no earlier run.
+// The first answers after a load or a re-deal are slower than the ones after them (each device's first pass reads its
+// part from disk, warms its caches and compiles its kernels): the first one on one device, the first two on several.
+// Those answers are marked warm (room.js speedDone) and never compared.
+export const warmupAnswers = (devices) => (+devices > 1 ? 2 : 1);
+// how many of the newest steady answers on a device count are looked at, and how many of the fastest of those count
+// (a slow answer now and then, a long prefill or a busy machine, does not set the figure)
+export const RECENT = 5, BEST = 3;
+const typical = (xs) => median(xs.slice(-RECENT).map((h) => h.tps).sort((x, y) => y - x).slice(0, BEST));
+// Like with like: the steady answers (not warm) on the newest answer's device count against the steady answers on the
+// count before it, the same model, each side the median of the best BEST of its newest RECENT. { x, from, to } (x = new /
+// old) or null when it would mislead: the newest answer is a warm-up, or either side has no steady answer yet.
 export function speedup(hist) {
-  if (hist.length < 2) return null;
-  const cur = hist[hist.length - 1].devices;
-  let i = hist.length - 1;
-  while (i >= 0 && hist[i].devices === cur) i--;
-  if (i < 0) return null;
-  const prev = hist[i].devices;
-  let j = i;
-  while (j >= 0 && hist[j].devices === prev) j--;
-  const a = median(hist.slice(j + 1, i + 1).map((h) => h.tps)), b = median(hist.slice(i + 1).map((h) => h.tps));
-  return a > 0 ? { x: b / a, from: prev, to: cur } : null;
+  if (!Array.isArray(hist) || hist.length < 2) return null;
+  const last = hist[hist.length - 1];
+  if (!last || last.warm || !(last.tps > 0)) return null;
+  const cur = last.devices, steady = hist.filter((h) => h && !h.warm && h.tps > 0 && h.model === last.model);
+  let prev = null;
+  for (let i = steady.length - 1; i >= 0; i--) if (steady[i].devices !== cur) { prev = steady[i].devices; break; }
+  if (prev == null) return null;
+  const a = typical(steady.filter((h) => h.devices === prev)), b = typical(steady.filter((h) => h.devices === cur));
+  return a > 0 && b > 0 ? { x: b / a, from: prev, to: cur } : null;
 }
+// (within 10% is "about as fast": answers on the same devices vary that much from one to the next)
 export function gainText(g) {
   if (!g || !(g.x > 0)) return "";
   const on = `than on ${g.from} device${g.from === 1 ? "" : "s"}`;
-  if (Math.abs(g.x - 1) < 0.05) return `about as fast as on ${g.from} device${g.from === 1 ? "" : "s"}`;
+  if (Math.abs(g.x - 1) < 0.1) return `about as fast as on ${g.from} device${g.from === 1 ? "" : "s"}`;
   return g.x > 1 ? `${g.x.toFixed(g.x >= 10 ? 0 : 1)}× faster ${on}` : `${Math.round((1 - g.x) * 100)}% slower ${on}`;
 }
 
@@ -165,7 +203,7 @@ export function pushEvent(list, text, now, max = 4) {
   else out.push({ text, at: now });
   return out.slice(-max);
 }
-export const onlineText = (n) => `online · ${n} device${n === 1 ? "" : "s"}`;
+export const onlineText = (n) => `Running on ${n} device${n === 1 ? "" : "s"}`;
 
 // GB as the cards print it (a tiny share, as the tests' synthetic model has, is not "0 GB")
 export const fmtGB = (gb) => (gb < 0.05 ? "<0.1" : gb >= 10 ? Math.round(gb) : Math.round(gb * 10) / 10) + " GB";

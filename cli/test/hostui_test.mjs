@@ -53,6 +53,20 @@ test("a short room: the same sentence and number as the room page; pledges that 
   assert.equal(ph.haveGB, 3);
 });
 
+test("Qwen3.8-Flash-Next: pooled host's fit and need are the planner's per-layer costs (room/models.js flashLayerCost)", () => {
+  const F = "qwen3.8-flash", ctx = nodeCtxFor(F), rb = roomBytes(F, ctx, "f16");
+  // its need: every layer's own cost at the context plus the host's part, rounded up to a tenth as the room page's NEED_GB
+  assert.equal(modelNeedGB(lib, F), Math.ceil((rb.layerCost.total + rb.hostBytes) / 2 ** 30 * 10 - 1e-9) / 10);
+  assert.equal(modelNeedGB(lib, F), NEED_GB[F]);
+  // two Sparks lending 34 GB each: short by the exact sums' gap (the host's 24 layers hold layers 0-5, the heavy ones)
+  const two = roomFitNow(lib, { model: F, devices: [dev("spark", 34, { ngram: true }), dev("spark2", 34, { ngram: true })], spareGB: [0, 0] });
+  const fit = roomFit(48, [34 * 2 ** 30, 34 * 2 ** 30], rb.layerCost, rb.hostBytes);
+  assert.equal(two.fits, fit.fits);
+  assert.equal(two.fits, false);
+  assert.equal(two.shortGB, gbUp(shortBy(fit, [0, 0])));
+  assert.equal(roomFitNow(lib, { model: F, devices: [dev("spark", 35, { ngram: true }), dev("spark2", 35, { ngram: true })] }).fits, true);
+});
+
 test("Start stays off until the pledges fit and the download is done; --start and --wait start by themselves", () => {
   const rows = modelRows(lib, { keys: KEYS, pulled: new Set(["qwen3-1.7b"]), pledgeGB: 12 });
   let s = initialState({ rows, model: "qwen3.6-35b-moe", pledge: { gb: 12, max: 60, totalGB: 128 }, fixedPledge: true, pulled: new Set(["qwen3.6-35b-moe"]), flags: { start: true, mode: "pool" } });

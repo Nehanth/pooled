@@ -7,7 +7,7 @@
 // spikes (0.3-0.6 GB), so 1 GB of layers is the most a phone can safely hold. Android tabs have
 // the same shape of limit and less data; navigator.deviceMemory (Chrome) sizes them.
 
-import { MODELS } from "./models.js";
+import { MODELS, flashDealReserve } from "./models.js";
 
 export const PHONE_DEFAULT_GB = 0.5;
 export const IOS_MAX_GB = 1;
@@ -49,6 +49,12 @@ export function pledgeGB(meta, hostCap = Infinity, model = null) {
   return Math.min(gb, rule.capped ? rule.max : Infinity, own, hostCap > 0 ? hostCap : Infinity, maxPledgeGB(model));
 }
 
+// A pledge as a dealer deals it, in bytes: pledgeGB less what the room's model keeps back on every device
+// (room/models.js flashDealReserve: Qwen3.8-Flash-Next's batched-pass scratch)
+export function dealPledgeBytes(meta, hostCap = Infinity, model = null) {
+  return Math.max(0, pledgeGB(meta, hostCap, model) * 2 ** 30 - flashDealReserve(model));
+}
+
 // A device's tab was killed while loading its layers (it came back with the "died" breadcrumb).
 // Loading it again with the same share would likely kill it again, so the host re-deals: with a
 // smaller share (half, in the device's steps, never below one layer), or without the device when
@@ -65,12 +71,26 @@ export function afterLoadDeath({ layers, layerGB, gb, deaths }) {
 }
 
 // Expert offload (room/plan.js offloadNeed): the system RAM a device lets the room park a MoE model's routed experts
-// in, in GB. Only a device that says it can (meta.offload: a room node on a discrete GPU; browsers never offload)
+// in, in GB. Only a device that says it can (meta.offload: a room node on a discrete GPU; browsers never park)
 // and as much as it says (meta.ramGB), held to the most one computer lends (DESK_MAX_GB). It is a promise like the
 // pledge: the deal never parks more than this. 0 for any other device.
 export function ramGB(meta) {
   const r = Number(meta?.ramGB);
   return meta?.offload && meta?.webgpu !== false && r > 0 ? Math.min(DESK_MAX_GB, r) : 0;
+}
+// Expert offload's disk tier in a browser tab (room/flashdisk.js tabDiskMeta; room.js): meta.tabDisk =
+// { ramGB, models, ask? }, a field of its own. It is not meta.offload / meta.ramGB on purpose: a host that predates it
+// (@pooled/cli 0.4.1's planner) reads those as RAM to park experts in, which a tab never does. ramGB: the RAM the
+// tier's spare and RAM cache (T1) may take; models: the model keys it reads experts of from disk (Qwen3.8-Flash-Next);
+// ask: its user has not said yes yet (the tab asks when a deal gives it disk layers, and refuses them on a no). A tab
+// whose user said no sends no tabDisk at all. -> GB for this model (0: no disk tier for it), held to DESK_MAX_GB
+export const TAB_DISK_MAX_GB = 16;
+export function tabDiskGB(meta, model) {
+  const t = meta?.tabDisk;
+  if (!t || typeof t !== "object" || meta?.webgpu === false || !model) return 0;
+  if (!Array.isArray(t.models) || !t.models.includes(model)) return 0;
+  const r = Number(t.ramGB);
+  return r > 0 ? Math.min(TAB_DISK_MAX_GB, r) : 0;
 }
 // Expert offload's disk tier (room/plan.js DISK_RAM_MIN): whether a device may leave some of this model's experts in
 // its files and read them when used. Only a device that offloads (ramGB) and says it has a disk tier (meta.disk: a
@@ -79,16 +99,37 @@ export function ramGB(meta) {
 export function diskFor(meta, model) {
   return !!model && ramGB(meta) > 0 && !!meta?.disk && Array.isArray(meta?.local) && meta.local.includes(model);
 }
+// The RAM a room node lets the room park this model's experts in (ramGB), or 0 for Qwen3.8-Flash-Next on a node whose
+// meta does not say it offloads Flash (meta.offloadFlash): offloadFor's own rule, shared with storageOf
+const nodeRam = (m, model) => (MODELS[model]?.kind === "qwen4exp" && !m?.offloadFlash ? 0 : ramGB(m));
+// What a device brings beyond its GPU memory for `model`, as the pool's Storage bar shows it (room.js renderPool), by
+// offloadFor's rules for one meta: "disk" (a tab with the disk tier for it, ask: its user has not said yes yet; a room
+// node with --disk and the model's files, ramGB: the RAM it reads them into), "ram" (a room node that parks it in RAM,
+// ramGB), or null (nothing).
+// Read-only: the planner reads offloadFor, never this.
+export function storageOf(meta, model) {
+  if (tabDiskGB(meta, model) > 0) return { kind: "disk", ask: !!meta.tabDisk.ask, ramGB: 0 };
+  const r = !meta?.tabDisk ? nodeRam(meta, model) : 0;
+  if (r > 0) return diskFor(meta, model) ? { kind: "disk", ask: false, ramGB: r } : { kind: "ram", ask: false, ramGB: r };
+  return { kind: null, ask: false, ramGB: 0 };
+}
 // room/plan.js's `off` for a room's devices (metas, host first) and the model's routed experts: a profile
 // (room/models.js expertsOf, roomBytes experts: what ExpertStore parks, layer by layer) or one layer's bytes (an
 // estimate), or null when the model has none or no device offloads. model: the model's key; with it, a device with a
 // disk tier for it (diskFor) is in off.disk (the field is there only when one is)
+// A browser tab with the OPFS disk tier for this model (meta.tabDisk: tabDiskGB) is in off.diskOnly: it never parks
+// experts (its GPU shares the computer's memory) and offloads only in the disk pass, with tabDisk.ramGB as RAM for the
+// spare and T1 (room/plan.js diskOnlyAt). For any other model it counts as a plain tab (no offload), field for field.
+// A room node offloads Qwen3.8-Flash-Next's experts only when its meta says it can (meta.offloadFlash, set by a node
+// whose shard.js has Flash offload): a released 0.4.1 node says offload for the Qwen 3.5 MoEs but refuses Flash's, so
+// it is dealt Flash layers within its pledge (as a node without --ram).
 export function offloadFor(metas, ex, model = null) {
-  const ram = metas.map((m) => ramGB(m) * 2 ** 30);
+  const only = metas.map((m) => tabDiskGB(m, model) > 0);
+  const ram = metas.map((m, i) => (only[i] ? tabDiskGB(m, model) : m?.tabDisk ? 0 : nodeRam(m, model)) * 2 ** 30);
   const expertBytes = ex && typeof ex === "object" ? +ex.E || 0 : +ex || 0;
   if (!(expertBytes > 0) || !ram.some((r) => r > 0)) return null;
-  const disk = metas.map((m) => diskFor(m, model));
-  return { expertBytes, ...(ex && typeof ex === "object" ? { experts: ex } : {}), ram, ...(disk.some(Boolean) ? { disk } : {}) };
+  const disk = metas.map((m, i) => only[i] || (!m?.tabDisk && nodeRam(m, model) > 0 && diskFor(m, model)));
+  return { expertBytes, ...(ex && typeof ex === "object" ? { experts: ex } : {}), ram, ...(disk.some(Boolean) ? { disk } : {}), ...(only.some(Boolean) ? { diskOnly: only } : {}) };
 }
 
 // The disk a device lets the room keep a model's n-gram table on (Qwen3.8-Flash-Next: room/plan.js placeNgram), in

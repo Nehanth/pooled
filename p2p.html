@@ -279,7 +279,8 @@
   .menu-acts :is(button, a):hover:not(:disabled) { background: var(--panel-3); }
   .menu-acts :is(button, a):hover .ic { background: var(--panel); box-shadow: inset 0 0 0 1px var(--border); color: var(--text); }
   .menu-acts button:active:not(:disabled) { transform: none; }
-  #cache-line { display: contents; }
+  #cache-line, #tabdisk-line { display: contents; }
+  #tabdisk-set { margin: 0 0 8px; }
   #cache-models { list-style: none; margin: 0 0 4px; padding: 0 0 0 44px; display: flex; flex-direction: column; gap: 4px; }
   #cache-models li { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-2); }
   #cache-models li span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
@@ -450,16 +451,21 @@
   #swarm-map.live .sm-live { background: var(--accent-soft); color: var(--accent-text); }
   .sm-lt { display: inline-block; }
   #swarm-map.live .sm-live { min-width: 104px; }   /* the words change every two seconds; the pill keeps its size */
-  #swarm-map.live .sm-live i { background: var(--accent); opacity: 1; animation: livebeat 1.1s var(--ease) infinite; }
+  #swarm-map.live .sm-live i { background: var(--accent); opacity: 1; }   /* a still dot: the pill's word says it is writing */
   @keyframes livebeat { 0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent); } 60% { box-shadow: 0 0 0 5px transparent; } }
   /* the numbers: tok/s, ms a lap, tokens so far, context used of max */
   .sm-stats { margin: 0 0 0 auto; display: flex; gap: 4px; min-width: 0; }
+  /* its numbers (ms per word, tokens, context) are the developer view's; the composer's ring says how full the chat is */
+  html:not(.dev) .sm-stats { display: none; }
   .sm-stats > div { display: flex; align-items: baseline; gap: 5px; height: 26px; padding: 0 9px; border-radius: 8px; }
   .sm-stats > div + div { box-shadow: -1px 0 0 var(--rule-2); border-radius: 0; }
   .sm-stats dd { order: -1; font: 500 13px/26px var(--mono); color: var(--text); font-variant-numeric: tabular-nums; }
   .sm-stats dt { font: 400 12px/26px var(--sans); color: var(--muted); }
   .sm-stats dd.warn { color: var(--warn-text); }
-  .sm-meta { margin-left: auto; overflow: hidden; text-overflow: ellipsis; }
+  /* the last real answer's speed, in words ("Last answer: about 3 words a second"; room.js speedMeta): one calm 12px
+     line, empty until there is one; never a live number */
+  .sm-meta { flex: 0 1 auto; min-width: 0; margin-left: auto; overflow: hidden; text-overflow: ellipsis; font: 400 12px/1 var(--sans); color: var(--muted); }
+  .sm-meta:empty { display: none; }
   /* folded: the split as small blocks, one per layer (or per few on a narrow bar), each in the colour
      of the device holding it, with small gaps (room.js paintMini) */
   .sm-mini { display: none; flex: 1 1 0; min-width: 40px; height: 16px; gap: 2px; align-items: stretch; }
@@ -471,6 +477,9 @@
   #swarm-map.folded .sm-strip { display: none; }
   #swarm-map.folded { gap: 0; padding-top: 8px; padding-bottom: 8px; }
   #swarm-map.folded .sm-stats > div:not(:first-child) { display: none; }
+  /* folded: one line, the model's name, its state, the split and the last answer's speed; no panel */
+  #swarm-map.folded .sm-head .sm-model { display: block; flex: 0 1 auto; min-width: 0; }
+  #swarm-map.folded .sm-head { flex-wrap: nowrap; }
   #room-screen.sweep #swarm-map.folded .sm-mini i { animation: minihot calc(var(--lap) * .9) var(--ease) both; animation-delay: calc(var(--lap) * .9 * var(--k, 0) / var(--lanes, 2)); }
   @keyframes minihot { 30% { filter: brightness(1.5) saturate(1.2); } }
   #band-toggle { flex: none; display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--muted); }
@@ -480,6 +489,7 @@
   .wd { display: inline-flex; gap: 3px; }
   .wd i { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
   .wd i:nth-child(2) { background: var(--a2); } .wd i:nth-child(3) { background: var(--a3); }
+  .m.bot:not(.live) .wd { display: none; }   /* the dots say "writing": they go when the answer is done */
   .m.bot.live .wd i { animation: pulse 1s infinite; }
   .m.bot.live .wd i:nth-child(2) { animation-delay: .33s; }
   .m.bot.live .wd i:nth-child(3) { animation-delay: .66s; }
@@ -492,16 +502,19 @@
   .hl span { font: 400 12px/1 var(--mono); flex: none; }
   .hl .lr { flex: none; margin-left: auto; padding-left: 6px; color: var(--muted); }
   .hl .lms { color: var(--accent-text); min-width: 5ch; text-align: right; }
+  html:not(.dev) .hl .lms { display: none; }   /* each lane's ms: the developer view only */
+  html:not(.dev) .hl .lr { display: none; }    /* and its layer numbers (the lane's tooltip has them) */
   .hl .lms:empty { display: none; }
   /* a lane's dot flashes as the pass reaches its first layer */
   .hl .act { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--sw); }
   #room-screen.sweep .sm-strip .hl .act { animation: actflash calc(var(--lap) * .9) var(--ease) both; animation-delay: calc(var(--lap) * .9 * var(--c0, 0) / var(--cells, 40)); }
-  @keyframes actflash { 0%, 100% { box-shadow: none; } 25% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--sw) 25%, transparent); } }
+  @keyframes actflash { 0%, 100% { box-shadow: none; } 25% { box-shadow: 0 0 0 2px color-mix(in srgb, var(--sw) 12%, transparent); } }
   /* the rail is the whole model; the device's cells sit at their layers */
   .cells { display: grid; grid-template-columns: repeat(var(--cells, 40), minmax(0, 1fr)); gap: 2px; height: var(--lh); border-radius: 3px; background: linear-gradient(var(--rule-2), var(--rule-2)) center / 100% 2px no-repeat; }
   .cells i { grid-row: 1; border-radius: min(3px, calc(var(--lh) / 3)); background: var(--sw); transform-origin: center; }
   #room-screen.sweep .sm-strip .cells i { animation: cellhot calc(var(--lap) * .9) var(--ease) both; animation-delay: calc(var(--lap) * .9 * var(--c) / var(--cells, 40)); }
-  @keyframes cellhot { 0%, 100% { transform: none; filter: none; box-shadow: none; } 30% { transform: scaleY(1.3); filter: brightness(1.45) saturate(1.2); box-shadow: 0 0 10px rgba(42,69,224,.5); } }
+  /* the token passing through: a soft brightening of each cell, no jump or glow (it runs on every token) */
+  @keyframes cellhot { 0%, 100% { filter: none; } 35% { filter: brightness(1.15); } }
   /* many devices: the labels get smaller with the lanes */
   #swarm-map[data-many] .hl { font-size: 12px; }
   #swarm-map[data-many] .hl svg { display: none; }
@@ -522,8 +535,8 @@
   @keyframes smflash { 0%, 100% { background: var(--faint); box-shadow: none; } 8% { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); } 30% { background: var(--accent); box-shadow: none; } }
   @keyframes smrun { 0% { left: -30%; opacity: 1; } 100% { left: 100%; opacity: 1; } }
 
-  /* the speed panel (room/speedo.js, room.js renderSpeed): the readout, big enough to read on a screen
-     recording; the recent answers as bars, the newest device count in blue; the room's events; the model.
+  /* the speed panel (room/speedo.js, room.js renderSpeed): the readout, one plain line ("Writing about 3 words a
+     second"; the exact tok/s in its tooltip); the recent answers as bars, the newest device count in blue; the room's events; the model.
      It replaces the band head's model name and tok/s, which stay in the page for the folded bar's width. */
   #swarm-map .sm-head .sm-model, #swarm-map .sm-stats > div:first-child { display: none; }
   #speedo { display: grid; grid-template-columns: minmax(200px, auto) minmax(0, 1fr) minmax(0, 340px); align-items: stretch; gap: 0; padding: 14px 0; border-radius: 12px; background: var(--panel); box-shadow: inset 0 0 0 1px var(--rule-2); }
@@ -532,11 +545,10 @@
   #speedo p { margin: 0; }
   .sp-read { display: flex; flex-direction: column; justify-content: center; gap: 6px; }
   .sp-num { display: flex; align-items: baseline; gap: 8px; white-space: nowrap; }
-  #sp-tps { font: 500 64px/.95 var(--mono); letter-spacing: -.04em; color: var(--text); font-variant-numeric: tabular-nums; }
-  .sp-u { font: 500 18px/1 var(--mono); color: var(--accent-text); }
+  .sp-num { white-space: normal; }
+  #sp-tps { font: 500 15px/1.35 var(--sans); letter-spacing: -.005em; color: var(--text); }
+  #sp-tps:empty { display: none; }
   .sp-sub { display: flex; align-items: center; gap: 7px; font: 400 13px/1.2 var(--sans); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  #speedo.live #sp-tps { color: var(--accent-text); }
-  #speedo.live .sp-sub::before { content: ""; flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: livebeat 1.1s var(--ease) infinite; }
   .sp-hist { display: flex; flex-direction: column; gap: 8px; }
   .sp-cap { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; font: 400 12px/1.2 var(--sans); color: var(--muted); white-space: nowrap; }
   #sp-gain { font: 500 14px/1.2 var(--sans); letter-spacing: -.005em; color: var(--accent-text); overflow: hidden; text-overflow: ellipsis; }
@@ -546,6 +558,7 @@
   #sp-hist .bar { position: relative; flex: 0 1 28px; min-width: 6px; height: calc(46px * var(--h)); display: flex; }
   #sp-hist .bar i { flex: 1; border-radius: 4px 4px 1px 1px; background: var(--blue-200); transition: height .3s var(--ease); }
   #sp-hist .bar.cur i { background: var(--accent); }
+  #sp-hist .bar.warm i { opacity: .45; }   /* a warm-up answer (the first after a load): shown, never compared */
   #sp-hist .bar:last-child i { box-shadow: 0 0 0 2px var(--accent-soft); }
   #sp-hist .bar.step:not(:first-child) { margin-left: 10px; }
   #sp-hist .bar.step:not(:first-child)::before { content: ""; position: absolute; left: -8px; bottom: -16px; height: calc(46px + 16px); max-height: 64px; border-left: 1px dashed var(--rule-3); }
@@ -554,7 +567,7 @@
   .sp-side { display: flex; flex-direction: column; gap: 10px; justify-content: center; }
   .sp-mod { display: flex; flex-direction: column; gap: 3px; }
   #sp-model { font: 400 24px/1.05 var(--display); letter-spacing: -.02em; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #sp-params { font: 400 13px/1.2 var(--mono); color: var(--ink-2); }
+  #sp-params { font: 400 13px/1.2 var(--sans); color: var(--ink-2); }
   #sp-events { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 0; margin: 0; padding: 0; list-style: none; font: 400 13px/1.3 var(--sans); color: var(--muted); }
   #sp-events li { white-space: nowrap; }
   #sp-events li + li::before { content: "\2192"; margin: 0 6px; color: var(--faint); }
@@ -590,23 +603,23 @@
   .sh-key { display: flex; flex-wrap: wrap; gap: 4px 16px; font: 400 12px/1.2 var(--mono); color: var(--ink-2); }
   .sh-key span { display: inline-flex; align-items: center; gap: 6px; }
   .sh-key i { width: 9px; height: 9px; border-radius: 2px; background: var(--sw); }
-  /* folded: the readout and the history stay, smaller; the cards and the token bar go */
-  #swarm-map.folded #speedo { margin-top: 8px; padding: 8px 0; }
-  #swarm-map.folded #sp-tps { font-size: 40px; }
-  #swarm-map.folded :is(#sp-devs, #sp-share) { display: none; }
-  #swarm-map.folded #sp-hist { min-height: 40px; }
-  #swarm-map.folded #sp-hist .bar { height: calc(26px * var(--h)); }
-  #swarm-map.folded #sp-hist .bar.step:not(:first-child)::before { height: 40px; }
-  #swarm-map.folded #sp-model { font-size: 18px; }
+  /* folded: no panel at all (the head's one line says the last answer's speed); the cards and the token bar go too */
+  #swarm-map.folded :is(#speedo, #sp-devs, #sp-share) { display: none; }
+  /* open before any real answer (room.js speedReady): the model and the device cards only, no readout and no empty chart */
+  #speedo.quiet > :is(.sp-read, .sp-hist) { display: none; }
+  #speedo.quiet { grid-template-columns: minmax(0, 1fr); }
+  #speedo.quiet > .sp-side { box-shadow: none; }
+  /* no answers yet: no empty chart and placeholder (its column stays, so the layout doesn't jump at the first one) */
+  .sp-hist:has(> #sp-hist.empty) > * { visibility: hidden; }
   @container pane (max-width: 760px) {
+    /* on a phone the empty chart and an empty readout take no room at all: the chat starts higher */
+    #speedo > .sp-hist:has(> #sp-hist.empty), #speedo > .sp-read:has(#sp-tps:empty):has(#sp-unit:empty) { display: none; }
     #speedo { grid-template-columns: minmax(0, 1fr); padding: 12px 0; row-gap: 10px; }
     #speedo > div { padding: 0 14px; }
     #speedo > div + div { box-shadow: none; }
     .sp-side { order: -1; flex-direction: row; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 12px; }
     .sp-mod { flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; min-width: 0; }
     #speedo > .sp-hist { box-shadow: 0 -1px 0 var(--rule-2); padding-top: 10px; }
-    #sp-tps { font-size: 48px; }
-    .sp-u { font-size: 15px; }
     #sp-model { font-size: 19px; }
     #sp-params { font-size: 12px; }
     #sp-events { font-size: 12px; }
@@ -614,9 +627,6 @@
     .sp-sub { white-space: normal; }
     .dv { min-width: 232px; }
     .dv-l { font-size: 12px; }
-    #swarm-map.folded #sp-tps { font-size: 36px; }
-    #swarm-map.folded #speedo { row-gap: 8px; }
-    #swarm-map.folded .sp-hist { padding-top: 8px; }
   }
 
   /* Chat | Code: the landing's segmented switch, a white pill that slides */
@@ -664,7 +674,9 @@
   #ai-panel { display: none; flex: none; flex-direction: row; width: min(860px, calc(100% - 32px)); margin: max(24px, calc(20vh - 56px)) auto 32px; background: var(--panel); border: 1px solid var(--border); border-radius: 16px; overflow: hidden; box-shadow: 0 1px 2px rgba(20,22,29,.04), 0 12px 24px -12px rgba(20,22,29,.10), 0 40px 80px -40px rgba(20,22,29,.22); animation: enter .45s var(--ease) .05s both; }
   #ai-panel.loading { display: none !important; }
   #ai-panel.online:not(:has(#ai-redeal:not([hidden]))) { display: none !important; }
-  #ai-panel.online { margin: 12px auto 0; order: 0; width: min(460px, calc(100% - 32px)); }
+  /* online, it is only the re-deal card: a flat card in the flow with a gap under it, so it doesn't read as lying on
+     top of the answers below */
+  #ai-panel.online { margin: 12px auto 8px; order: 0; width: min(460px, calc(100% - 32px)); box-shadow: none; }
   #ai-panel.online .ap-side { display: none; }
   .ap-main { flex: 1.15 1 0; min-width: 0; display: flex; flex-direction: column; }
   .ap-side { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; background: var(--panel-3); border-left: 1px solid var(--rule-2); }
@@ -678,9 +690,16 @@
   .ap-k { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; font-size: 13px; font-weight: 400; color: var(--muted); }
   .ap-k b { font: 500 22px/1 var(--mono); letter-spacing: -.02em; color: var(--text); font-variant-numeric: tabular-nums; }
   /* the pool: one segment per device, a tick where each model starts to fit */
-  #ap-meter { position: relative; height: 10px; margin: 14px 0 10px; border-radius: 5px; background: var(--panel-2); box-shadow: inset 0 0 0 1px var(--rule-2); }
+  /* a disk model picked (room/diskpick.js pool words): a GPU memory bar and a Storage bar, one segment per device */
+  .ap-bk { display: flex; justify-content: space-between; align-items: baseline; margin: 12px 0 -6px; font-size: 12px; color: var(--muted); }
+  .ap-bk b { font: 400 12px/1 var(--mono); color: var(--ink-2); }
+  #ap-meter, #ap-smeter { position: relative; height: 10px; margin: 14px 0 10px; border-radius: 5px; background: var(--panel-2); box-shadow: inset 0 0 0 1px var(--rule-2); }
   .apm-fill { position: absolute; inset: 0; display: flex; gap: 2px; border-radius: 5px; overflow: hidden; }
   .apm-fill i { flex: none; height: 100%; background: var(--sw); transition: width .6s var(--ease); }
+  #ap-smeter .apm-fill i { flex: 1 1 0; }
+  .apm-fill i.ask { background: transparent; box-shadow: inset 0 0 0 1.5px var(--sw); }
+  .apm-fill i.ram { background: var(--sw); opacity: .45; }
+  .apm-fill i.no { background: transparent; }
   .apm-ticks span { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; border-radius: 1px; background: var(--border-2); }
   .apm-ticks span.ok { background: var(--text); }
   .apm-ticks span b { position: absolute; top: calc(100% + 5px); left: 50%; transform: translateX(-50%); font: 400 11px/1 var(--mono); color: var(--muted); white-space: nowrap; }
@@ -690,10 +709,16 @@
   .apm-ticks span.sel.ok b { color: var(--accent-text); }
   .apm-ticks span.r b { left: auto; right: -2px; transform: none; }
   .apm-ticks span.l b { left: -2px; transform: none; }
-  #ap-need { display: flex; align-items: baseline; gap: 6px; margin: 0 0 14px; font-size: 12px; color: var(--muted); }
-  #ap-need b { font: 500 12px/1 var(--mono); color: var(--text); }
-  #ap-need span { margin-left: auto; font: 400 12px/1 var(--mono); color: var(--ink-2); }
-  #ap-need.ok span { color: var(--accent-text); }
+  #ap-need, #ap-store { display: flex; align-items: baseline; gap: 6px; margin: 0 0 14px; font-size: 12px; color: var(--muted); }
+  :is(#ap-need, #ap-store) b { font: 500 12px/1 var(--mono); color: var(--text); }
+  :is(#ap-need, #ap-store) span { margin-left: auto; font: 400 12px/1 var(--mono); color: var(--ink-2); }
+  :is(#ap-need, #ap-store).ok span { color: var(--accent-text); }
+  /* the disk model's two lines (#ap-need.fl while it is picked): the words wrap beside the chip; other models' line is unchanged */
+  :is(#ap-need.fl, #ap-store) { flex-wrap: wrap; }
+  :is(#ap-need.fl, #ap-store) span { white-space: nowrap; }
+  :is(#ap-need.fl, #ap-store) em { flex: 1 1 0; min-width: 0; font-style: normal; line-height: 1.45; }
+  #ap-store-fix { margin: -8px 0 14px; font-size: 12px; line-height: 1.45; color: var(--muted); }
+  #ap-devs li small.dk { color: var(--muted); }
   /* four and a half rows (20px rows, 6px gaps), then the list scrolls: the card keeps its height as more
      devices join. The fade covers only the half row, so the four above it stay clear */
   #ap-devs { list-style: none; display: flex; flex-direction: column; gap: 6px; max-height: 115px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
@@ -756,11 +781,11 @@
   .rung { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; align-items: center; gap: 10px; width: 100%; height: 52px; font: 400 14px/1.2 var(--sans); padding: 0 14px 0 12px; color: var(--muted); background: var(--panel); border: 1px solid var(--rule-2); border-radius: 12px; text-align: left; }
   .rung::before { content: ""; width: 14px; height: 14px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--border-2); background: var(--panel); transition: box-shadow .15s; }
   .rung .rn { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .rung .nd { font: 400 12px/1 var(--mono); color: var(--muted); }
-  .rung .fig { display: inline-flex; align-items: center; gap: 8px; justify-self: end; white-space: nowrap; }
-  .rung b { font: 500 11px/1 var(--mono); color: var(--accent-text); padding: 4px 6px; border-radius: 4px; background: var(--accent-soft); }
+  .rung .nd, .dk-row .nd { font: 400 12px/1 var(--mono); color: var(--muted); }
+  .rung .fig, .dk-row .fig { display: inline-flex; align-items: center; gap: 8px; justify-self: end; white-space: nowrap; }
+  .rung b, .dk-row .fig b { font: 500 11px/1 var(--mono); color: var(--accent-text); padding: 4px 6px; border-radius: 4px; background: var(--accent-soft); }
   /* short: a neutral tag in the shape of "fits" (calm, no warning colour) */
-  .rung .more { font: 400 11px/1 var(--mono); color: var(--ink-2); padding: 4px 6px; border-radius: 4px; background: var(--panel-2); box-shadow: inset 0 0 0 1px var(--rule-2); }
+  .rung .more, .dk-row .more { font: 400 11px/1 var(--mono); color: var(--ink-2); padding: 4px 6px; border-radius: 4px; background: var(--panel-2); box-shadow: inset 0 0 0 1px var(--rule-2); }
   .rung.ok { color: var(--text); }
   /* short rows stay selectable, so their text keeps AA contrast: only the circle and chip fade */
   .rung.short:not(.sel) { color: var(--ink-4); }
@@ -773,60 +798,135 @@
   .rung.sel::before { box-shadow: inset 0 0 0 4.5px var(--accent); }
   #ai-redeal { width: 100%; font: 500 13px/1 var(--sans); border-color: var(--warn); color: var(--warn-text); }
   #redeal-why { font-size: 12px; color: var(--ink-2); }
-  #ai-give { width: 100%; font: 500 13px/1 var(--sans); }
-  #ai-panel:is(.loading, .online) :is(#ai-give, #ai-why) { display: none; }
+  #ai-redeal-skip { align-self: center; padding: 4px 8px; border: 0; background: transparent; font: 500 12px/1 var(--sans); color: var(--muted); }
+  #ai-redeal-skip:hover:not(:disabled) { color: var(--text); background: transparent; text-decoration: underline; }
+  #ai-give, #ai-allow-disk { width: 100%; font: 500 13px/1 var(--sans); }
+  #ai-panel:is(.loading, .online) :is(#ai-give, #ai-allow-disk, #ai-why) { display: none; }
   #ai-why { font-size: 12px; line-height: 1.45; color: var(--ink-2); text-align: center; }
+  /* a model kept on disk (room/diskpick.js): a normal row with its size and "runs from disk" as the chip. Picked, it
+     takes the Code tab's selected look (#mode-bar: near-black, a soft blue glow, stars twinkling inside:
+     site/js/sparkle.js), and the note under the rows says what it is and what it needs. Same card, same width. */
+  .rung.disk { position: relative; transition: background-color .3s ease, box-shadow .3s ease, border-color .3s ease, color .3s ease; }
+  .rung .dkc { font: 400 11px/1 var(--mono); color: var(--ink-2); padding: 4px 6px; border-radius: 4px; background: var(--panel-2); box-shadow: inset 0 0 0 1px var(--rule-2); }
+  .rung.short:not(.sel) .dkc { color: var(--ink-3); box-shadow: none; }
+  .rung.disk.sel, .rung.disk.sel:hover:not(:disabled) { background: #0B0D14; border-color: #0B0D14; color: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.25), 0 0 16px -3px rgba(110,134,255,.6); }
+  .rung.disk.sel > .pooled-tw { opacity: 1; }
+  .rung.disk.sel .dkc, .rung.disk.sel .more { color: #fff; background: rgba(255,255,255,.1); box-shadow: none; }
+  .rung.disk.sel b { color: #C7D2FE; background: rgba(110,134,255,.24); }
+  /* short (the longer chip) or a phone: the chip keeps "runs from disk" so the name and the fit chip keep their room */
+  .rung.disk.short .dkz { display: none; }
+  @media (max-width: 480px) { .rung .dkc .dkz { display: none; } }
+  .rung.disk.sel::before { background: #0B0D14; box-shadow: inset 0 0 0 4.5px #fff; }
+  /* Flash's per-device settings (room/diskpick.js): "What this device gives" in the right column, the pledge
+     stepper relabelled "GPU memory" with a one-line hint in place of the pledge paragraph, then Disk in the
+     Advanced-style rows with the rows' own chips. Only while Flash is picked; its fit is its row's chip and the pool's. */
+  #ap-for[hidden], #ap-flash[hidden] { display: none; }
+  .ap-for { flex-basis: 100%; margin-bottom: -2px; }
+  .ap-me.flash > h3.ap-k { color: var(--text); }
+  #ap-flash { flex-basis: 100%; padding: 0; border-top: 1px solid var(--rule-2); }
+  #ap-flash:focus { outline: none; }
+  .ai-go { display: flex; gap: 8px; }
+  .ai-go #ai-start { flex: 1; min-width: 0; }
+  .dk-rows { display: flex; flex-direction: column; padding: 0 2px; }
+  .dk-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 14px; row-gap: 3px; padding: 10px 0; }
+  .dk-row + .dk-row { border-top: 1px solid var(--rule-2); }
+  .dk-row:last-child { padding-bottom: 0; }
+  .dk-row .k { font-size: 13px; color: var(--text); }
+  .dk-row .h { grid-column: 1; font-size: 12px; line-height: 1.45; color: var(--muted); }
+  .dk-row > :nth-child(2) { grid-row: 1 / span 2; grid-column: 2; }
+  .dk-row .v { font: 400 12px/1 var(--mono); color: var(--ink-2); }
+  .dk-del, .dk-act { font: 500 12px/1 var(--sans); padding: 8px 11px; border-radius: 8px; }
+  .dk-del { color: var(--del); }
+  #ai-panel:is(.loading, .online) #ap-flash { display: none; }
   #ai-loading { display: none !important; }
   @keyframes enter { from { opacity: 0; transform: translateY(8px); } }
-  /* loading: the landing's pick card. The logo's wave, what loads, each device's share of it, and
-     where this device's bytes come from (the network or its cache) with a time left once it is known */
-  #load-card { display: none; margin: auto; width: min(560px, calc(100% - 32px)); padding: 24px 24px 20px; background: var(--panel); border: 1px solid var(--border); border-radius: 16px; box-shadow: 0 1px 2px rgba(20,22,29,.04), 0 12px 24px -12px rgba(20,22,29,.10), 0 40px 80px -40px rgba(20,22,29,.22); }
+  /* The load card (room.js lcPaint): from the Start press to the first question, one card telling one story.
+     Eyebrow, the headline (how long until chat, then "ready"), one sentence of what is happening, the room's bar,
+     then this computer's two rows at most (alone; one part: its bytes under the bar) or a row per device with one
+     bar each, and a quiet footer. A disk question asked during the load is in the card (.lc-ask) */
+  /* its top stays put (it grows only downwards as rows come and go), the composer stays at the bottom */
+  #load-card { display: none; margin: clamp(16px, 9vh, 88px) auto auto; width: min(600px, calc(100% - 32px)); padding: 24px 24px 20px; background: var(--panel); border: 1px solid var(--border); border-radius: 16px; box-shadow: 0 1px 2px rgba(20,22,29,.04), 0 12px 24px -12px rgba(20,22,29,.10), 0 40px 80px -40px rgba(20,22,29,.22); }
   #load-card.on { display: block; animation: enter .35s var(--ease); }
-  .lc-head { display: flex; align-items: center; gap: 16px; }
-  .lc-head .dl { flex: none; width: 40px; height: 40px; }
-  .lc-h { flex: 1; min-width: 0; }
-  .lc-t { font: 400 22px/1.15 var(--display); letter-spacing: -.02em; color: var(--text); }
-  #lc-model { color: var(--text); }
-  .lc-note { margin-top: 5px; font-size: 13px; color: var(--muted); }
-  #lc-sum { display: none; }
-  #lc-rows { margin: 20px 0 16px; border-top: 1px solid var(--rule-2); }
-  .lc-row { display: grid; grid-template-columns: 8px minmax(0, 170px) minmax(0, 1fr) 64px; align-items: center; gap: 12px; min-height: 52px; padding: 6px 0; border-bottom: 1px solid var(--rule-2); font-size: 14px; }
-  .lc-row.out { opacity: .5; }
+  /* while it is up, the transcript stays out of the way (the first question takes the card down: room.js aiOut) */
+  #load-card.on ~ #ai-output { display: none !important; }
+  /* slim: a load under a conversation (a device added, or one gone: a re-deal) is one line and a thin bar over the
+     chat, which stays readable; the composer under it sends a question once the model is back (room.js aiLoading) */
+  #load-card.on.slim { display: grid; grid-template-columns: minmax(0, 1fr) minmax(96px, 30%); align-items: center; column-gap: 16px; flex: none;
+    width: auto; margin: 8px var(--gutter) 0; padding: 10px 14px; border-radius: 12px; box-shadow: none; animation: enter .25s var(--ease); }
+  #load-card.slim :is(.lc-top, .lc-sent, .lc-sub, #lc-rows, .lc-foot) { display: none; }
+  #load-card.slim .lc-hl { margin: 0; min-width: 0; font: 400 13px/1.35 var(--sans); letter-spacing: 0; color: var(--ink-2); }
+  #load-card.slim .lc-bar { margin: 0; gap: 10px; }
+  #load-card.slim .lc-bar .track { height: 4px; }
+  #load-card.slim .lc-bar .pct { min-width: 32px; font-size: 11px; color: var(--muted); }
+  #load-card.slim .lc-ask { grid-column: 1 / -1; }
+  #load-card.on.slim ~ #ai-output { display: block !important; }
+  .lc-top { display: flex; align-items: center; gap: 14px; }
+  .lc-top .dl { flex: none; width: 40px; height: 40px; }
+  #load-card:is(.ready, .stopped) .lc-top .dl circle { animation: none; }
+  #load-card.stopped .lc-top .dl circle:last-child { fill: var(--muted); }
+  .lc-eyebrow { font: 400 13px/1.3 var(--sans); color: var(--muted); min-width: 0; }
+  .lc-hl { margin-top: 14px; font: 400 28px/1.15 var(--display); letter-spacing: -.02em; color: var(--text); }
+  .lc-sent { margin-top: 6px; font-size: 15px; line-height: 1.45; color: var(--ink-2); }
+  .lc-bar { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 14px; margin-top: 18px; }
+  .lc-bar .track { height: 8px; background: var(--panel-2); border-radius: 4px; overflow: hidden; }
+  .lc-bar .fill { height: 100%; width: 0%; background: var(--accent); border-radius: 4px; transition: width .6s var(--ease), background-color .3s; }
+  .lc-bar .pct { min-width: 44px; text-align: right; font: 400 12px/1 var(--mono); color: var(--text); font-variant-numeric: tabular-nums; }
+  #load-card.ready .lc-bar .fill { background: var(--ok); }
+  #load-card.ready .lc-bar .pct { color: var(--ok); }
+  #load-card.stopped .lc-bar .fill { background: var(--muted); }
+  #load-card.stopped .lc-bar .pct { color: var(--muted); }
+  /* stopped: nothing on it reads as still going or as a success (finished rows grey too) */
+  #load-card.stopped :is(.lc-part.run, .lc-part.done) .bar i, #load-card.stopped .lc-row .fill { background: var(--faint); }
+  #load-card.stopped .lc-part.done .v { color: var(--muted); }
+  .lc-sub { margin: 8px 0 0; min-height: 18px; font: 400 12px/18px var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+  .lc-sub[hidden] { display: none; }
+  .lc-ask { margin-top: 16px; padding: 14px 16px; border-radius: 12px; background: var(--panel-3); border: 1px solid var(--rule-2); }
+  .lc-ask[hidden] { display: none; }
+  .lc-ask .q { font-size: 15px; font-weight: 500; color: var(--text); }
+  .lc-ask .h { margin-top: 4px; font-size: 13px; line-height: 1.45; color: var(--muted); }
+  .lc-ask .lc-actions { margin-top: 12px; }
+  #lc-rows { margin: 18px 0 0; border-top: 1px solid var(--rule-2); }
+  #lc-rows:empty { display: none; }
+  /* one part on this computer: label | value, a thin bar under it */
+  .lc-part { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; align-items: baseline; padding: 11px 0; border-bottom: 1px solid var(--rule-2); font-size: 14px; color: var(--text); }
+  .lc-part .v { font: 400 12px/1.2 var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .lc-part .bar { grid-column: 1 / -1; height: 4px; background: var(--panel-2); border-radius: 2px; overflow: hidden; }
+  .lc-part .bar i { display: block; height: 100%; width: 0%; background: var(--accent); border-radius: 2px; transition: width .6s var(--ease); }
+  .lc-part.wait { color: var(--muted); }
+  .lc-part.done .v { color: var(--ok); }
+  .lc-part.done .bar i { background: var(--ok); }
+  .lc-part.fail .v { color: var(--err); }
+  .lc-part.fail .bar i { background: var(--muted); }
+  /* the word list read online instead: hatched, not an error */
+  .lc-part.fb .bar i { background: repeating-linear-gradient(135deg, var(--faint) 0 4px, transparent 4px 8px); }
+  /* a device's row (several devices) and its parts as meters under it */
+  .lc-dev { border-bottom: 1px solid var(--rule-2); padding: 2px 0; }
+  .lc-row { display: grid; grid-template-columns: 8px minmax(0, 190px) minmax(0, 1fr) 52px; align-items: center; gap: 12px; min-height: 40px; font-size: 14px; }
   .lc-row .sw { width: 8px; height: 8px; border-radius: 50%; background: var(--sw); }
-  .lc-row .n { display: flex; flex-direction: column; gap: 3px; min-width: 0; color: var(--text); }
-  .lc-row .n .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  /* which layers this device is downloading (then holds), under its name */
-  .lc-row .n .lr { font: 400 11.5px/1.2 var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-transform: none; }
-  .lc-row.done .n .lr { color: var(--accent-text); }
+  .lc-row .n { display: flex; align-items: baseline; gap: 8px; min-width: 0; color: var(--text); }
+  .lc-row .n .nm { flex: none; white-space: nowrap; }
+  .lc-row .n .lr { font: 400 13px/1.2 var(--sans); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-transform: none; }
   .lc-row .n small { color: var(--muted); font-size: 12px; }
   .lc-row .bar { height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden; }
-  .lc-row .fill { height: 100%; width: 0%; background: var(--sw); border-radius: 3px; transition: width 0.6s var(--ease); }
-  .lc-row .pct { text-align: right; color: var(--muted); font: 400 12px/1 var(--mono); white-space: nowrap; }
-  .lc-row.done .pct { color: var(--accent-text); }
-  #lc-strip { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 2px; height: 22px; }
-  #lc-strip:empty { display: none; }
-  #lc-strip i { border-radius: 2px; background: var(--panel-2); transition: background-color .3s; }
-  #lc-status { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-top: 16px; font-size: 13px; color: var(--ink-2); min-height: 20px; }
-  #lc-status:empty { display: none; }
-  #lc-status .src { display: inline-flex; align-items: center; gap: 7px; padding: 6px 10px 6px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-text); font: 500 12px/1 var(--mono); }
-  #lc-status .src::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: blink 1.6s infinite; }
-  #lc-status .src.cache { background: #E9F4EC; color: var(--ok); }
-  #lc-status .src.gpu { background: var(--panel-2); color: var(--ink-2); }
-  #lc-status .b { font: 400 12px/1 var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
-  #lc-status .eta { margin-left: auto; color: var(--text); font-weight: 500; }
-  #lc-status .eta.wait { color: var(--muted); font-weight: 400; }
-  /* every device has its layers: the rows give way to the Pooled mark in its wave while the model starts
-     (on the GPUs, the devices linked up), until the room opens on the chat */
-  #load-card.starting { text-align: center; }
-  #load-card.starting :is(#lc-rows, #lc-strip) { display: none; }
-  #load-card.starting .lc-head { flex-direction: column; gap: 22px; padding: 18px 0 4px; animation: enter .45s var(--ease); }
-  #load-card.starting .lc-head .dl { width: 76px; height: 76px; }
-  #load-card.starting .lc-head .dl circle { animation-duration: 1.6s; }
-  #load-card.starting .lc-h { flex-basis: auto; }
-  #load-card.starting #lc-status { justify-content: center; margin-top: 18px; }
+  .lc-row .fill { height: 100%; width: 0%; background: var(--sw); border-radius: 3px; transition: width .6s var(--ease); }
+  .lc-row .pct { text-align: right; color: var(--muted); font: 400 12px/1 var(--mono); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .lc-foot { margin-top: 14px; font-size: 13px; line-height: 1.45; color: var(--muted); }
+  .lc-foot:empty { display: none; }
+  .lc-foot.box { padding: 10px 12px; border-radius: 10px; background: var(--panel-3); border: 1px solid var(--rule-2); color: var(--ink-2); }
+  .lc-foot.box b { font-weight: 500; color: var(--text); }
+  .lc-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+  .lc-actions button { padding: 10px 16px; border-radius: 10px; font: 500 14px/1 var(--sans); }
+  /* the composer under the card, there from the Start press and off until the model is ready */
+  #ai-row:has(#ai-prompt:disabled) { opacity: .6; }
+  #ai-row:has(#ai-prompt:disabled):focus-within { border-color: var(--border-2); box-shadow: none; }
+  #ai-prompt:disabled { cursor: not-allowed; }
   @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
 
   #ai-output { display: none; flex: 1; min-height: 0; overflow-y: auto; white-space: normal; word-wrap: break-word; padding: 20px var(--gutter) 10px; background: transparent; scrollbar-width: thin; scrollbar-color: var(--faint) transparent; }
+  /* scrolled, the answers fade under its top edge rather than end in a hard cut that reads as a card lying over them
+     (the "Add pc" card above it at 1000 px, flash demo 2026-10-13); at the top the fade is only the padding */
+  #ai-output { -webkit-mask-image: linear-gradient(transparent, #000 14px); mask-image: linear-gradient(transparent, #000 14px); }
+  #chatpane:has(#ai-panel.online) #ai-output { margin-top: 4px; }
   #ai-output .u { color: var(--accent-text); font-weight: 600; }
   #ai-output .stats { font-family: var(--mono); color: var(--muted); font-size: 11px; }
   .m { display: flex; flex-direction: column; margin: 14px 0; max-width: min(80%, 640px); animation: enter .3s var(--ease); }
@@ -1558,6 +1658,19 @@
   @media (max-width: 1000px) {
     body.in-room .pchip .cg { display: none; }
   }
+  /* a one-row bar from 821 to 1180 px (a 1000 px window, the Flash demo): the devices' chips come first, so the words
+     around them give way ("Room" before the code, "Serve" before API, the chips' icons and GB; under 960 the logo's
+     word and "pooled" after the total) and a second device's chip is never cut down to its dot */
+  @media (min-width: 821px) and (max-width: 1180px) {
+    body.in-room #room-badge::before { display: none; }
+    body.in-room #room-badge { padding-left: 12px; }
+    body.in-room #compute-open .lw { display: none; }
+    body.in-room .pchip .pic, body.in-room .pchip .cg { display: none; }
+    body.in-room header { gap: 10px; }
+  }
+  @media (min-width: 821px) and (max-width: 960px) {
+    body.in-room .logo span, body.in-room #hdr-sum .hw { display: none; }
+  }
 
   /* ---- phones and narrow windows: the bar takes two rows (room and actions; the devices) ---- */
   @media (max-width: 820px) {
@@ -1601,13 +1714,16 @@
     #chat-tools { padding: 8px 10px 0; }
     #chat-log { display: none; }
     #load-card { padding: 16px; }
-    .lc-row { grid-template-columns: 8px minmax(0, 150px) minmax(0, 1fr) 52px; gap: 8px; font-size: 13px; }
-    .lc-row .lw { display: none; }   /* phones: "layers 21–40" under the name, without "downloading" */
-    .lc-head { flex-wrap: wrap; gap: 12px 14px; }
-    .lc-head .dl { width: 34px; height: 34px; }
-    .lc-h { flex-basis: calc(100% - 50px); }
-    .lc-t { font-size: 22px; }
-    #lc-sum { order: 3; flex-basis: 100%; margin: 0; }
+    .lc-top .dl { width: 32px; height: 32px; }
+    .lc-hl { font-size: 22px; margin-top: 12px; }
+    .lc-sent { font-size: 14px; }
+    /* a device's row in two lines: name and what it is doing, then its bar */
+    .lc-row { grid-template-columns: 8px minmax(0, 1fr) 44px; gap: 6px 8px; min-height: 0; padding-top: 8px; font-size: 13px; }
+    .lc-row .bar { grid-column: 2 / -1; grid-row: 2; }
+    .lc-dev { padding-bottom: 10px; }
+    .lc-part .bar { display: none; }
+    #load-card { margin-top: 12px; }
+    #load-card.on.slim { grid-template-columns: minmax(0, 1fr); row-gap: 6px; margin: 8px 10px 0; padding: 10px 12px; }
     .ag-h, #code-driver, #code-log, #code-bar { padding-left: 12px; padding-right: 12px; }
     #code-row { margin-left: 10px; margin-right: 10px; }
     #code-pane :is(.cm-approve button, #pv-open) { min-height: 36px; font-size: 12px; }
@@ -1629,6 +1745,8 @@
   /* a first row too narrow for "Serve API" (measured: at 421px, with "Room" back beside the code, it pushed settings to a second row):
      "API" beside the mark, its name still "Serve API" */
   @media (max-width: 480px) { #compute-open .lw { display: none; } }
+  /* under 400 px the mark alone (its name stays "Serve API"): with "API" beside it the settings button took a row of its own */
+  @media (max-width: 400px) { #compute-open .lbl { display: none; } #compute-open { padding: 0 10px; } }
   @media (max-width: 370px) {
     body.in-room #hdr-sum { width: 0; padding: 0; font-size: 0; }   /* no total; its fade still ends the chip row */
     #share-btn .lbl { display: none; }
@@ -1865,6 +1983,10 @@
             <select id="ai-split" class="seg-src" aria-labelledby="l-split" tabindex="-1"><option value="memory">by memory (every device holds some)</option><option value="speed" selected>for speed (fastest devices, fewest hops)</option></select>
           </div>
           <div class="set set-row">
+            <div class="set-l"><b id="l-autoadd">Add devices that join</b><span>A device that joins while the model runs is added to it when the room is free: each device loads its part again (about a minute or two), and the chat stays.</span></div>
+            <label class="switch"><input type="checkbox" id="ai-autoadd" role="switch" aria-labelledby="l-autoadd" checked><i aria-hidden="true"></i></label>
+          </div>
+          <div class="set set-row">
             <div class="set-l"><b id="l-autoredeal">Re-deal on its own <span class="exp">experimental</span></b><span>When a device drops and is not back within a minute, deal its layers to the devices still here; an answer or Code run in progress carries on.</span></div>
             <label class="switch"><input type="checkbox" id="ai-autoredeal" role="switch" aria-labelledby="l-autoredeal" checked><i aria-hidden="true"></i></label>
           </div>
@@ -1872,10 +1994,15 @@
       </div>
       <section class="ms" aria-labelledby="ms-room">
         <h3 id="ms-room">Room</h3>
+        <div class="set set-row" id="tabdisk-set" hidden>
+          <div class="set-l"><b id="l-tabdisk">Disk storage for big models</b><span id="d-tabdisk">Qwen3.8 Flash runs from disk: it saves up to 92.4 GB to this device once.</span></div>
+          <label class="switch"><input type="checkbox" id="tabdisk-allow" role="switch" aria-labelledby="l-tabdisk" aria-describedby="d-tabdisk"><i aria-hidden="true"></i></label>
+        </div>
         <div class="menu-acts">
           <button id="export-chat" type="button"><span class="ic"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.5v7M5 6.5l3 3 3-3M3 11.5v2h10v-2"/></svg></span>Save the chat<small>The conversation as a Markdown file</small></button>
           <button id="card-btn" type="button"><span class="ic"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1.6"/><path d="M2.5 11l3.5-3.5 2.5 2.5 2-2 3 3"/><circle cx="10.8" cy="5.9" r=".9"/></svg></span>Room card<small>A picture of this room's devices and speed</small></button>
           <a id="docs-link" href="/docs" target="_blank" rel="noopener"><span class="ic"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 2.5h7.5L13 5v8.5H3z"/><path d="M5.5 7.5h5M5.5 10h5"/></svg></span>Docs<small>How rooms, the Serve API and Code mode work (new tab)</small></a>
+          <span id="tabdisk-line" hidden><a href="#" id="tabdisk-free"><span class="ic"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="4" width="11" height="8" rx="1.5"/><path d="M5 9.5h3"/><circle cx="11" cy="9.5" r=".8"/></svg></span>Delete saved copy<small>Deletes Qwen3.8 Flash's copy on this device</small></a></span>
           <span id="cache-line"><a href="#" id="cache-clear"><span class="ic"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 4.5h11M6 4.5V3h4v1.5M4 4.5l.7 9h6.6l.7-9"/></svg></span>Clear cached weights<small>Frees this device's disk; the next start downloads again</small></a></span>
         </div>
         <ul id="cache-models" aria-label="Cached models" hidden></ul>
@@ -1942,7 +2069,7 @@
   <main id="chatpane">
     <h1 class="sr-only" id="room-h">Room</h1>
     <div id="topline">
-      <div id="swarm-map" hidden><div class="sm-head"><span class="sm-model"></span><span class="sm-live"><i aria-hidden="true"></i><span class="sm-lt">Ready</span></span><div class="sm-mini" aria-hidden="true"></div><dl class="sm-stats"><div><dt>tok/s</dt><dd id="sm-tps">-</dd></div><div title="How long one word takes to pass through every device"><dt>ms per word</dt><dd id="sm-lap">-</dd></div><div><dt>tokens</dt><dd id="sm-tok">0</dd></div><div><dt>context</dt><dd id="sm-ctx">-</dd></div></dl><span class="sm-meta" hidden></span><button id="band-toggle" class="tip-l" type="button" aria-expanded="true" aria-controls="sm-body" aria-label="Hide the layers" data-tip="Hide the layers"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 8.5L7 5l3.5 3.5"/></svg></button></div><section id="speedo" aria-label="How fast the room writes"><div class="sp-read"><p class="sp-num"><b id="sp-tps" aria-live="off">–</b><span class="sp-u">tok/s</span></p><p id="sp-unit" class="sp-sub">waiting for a question</p></div><div class="sp-hist"><p class="sp-cap"><span>recent answers</span><span id="sp-gain"></span></p><ol id="sp-hist" class="empty" aria-label="Speed of recent answers"></ol></div><div class="sp-side"><p class="sp-mod"><b id="sp-model"></b><span id="sp-params"></span></p><ol id="sp-events" aria-label="Room events"></ol></div></section><ul id="sp-devs" aria-label="What each device does"></ul><div id="sp-share" hidden></div><div class="sm-strip" id="sm-body" aria-hidden="true"></div><div class="sm-track dev-only"></div></div>
+      <div id="swarm-map" hidden><div class="sm-head"><span class="sm-model"></span><span class="sm-live"><i aria-hidden="true"></i><span class="sm-lt">Ready</span></span><div class="sm-mini" aria-hidden="true"></div><dl class="sm-stats"><div><dt>tok/s</dt><dd id="sm-tps">-</dd></div><div class="dev-only" title="How long one word takes to pass through every device"><dt>ms per word</dt><dd id="sm-lap">-</dd></div><div class="dev-only"><dt>tokens</dt><dd id="sm-tok">0</dd></div><div class="dev-only"><dt>context</dt><dd id="sm-ctx">-</dd></div></dl><span class="sm-meta"></span><button id="band-toggle" class="tip-l" type="button" aria-expanded="true" aria-controls="sm-body" aria-label="Hide the layers" data-tip="Hide the layers"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 8.5L7 5l3.5 3.5"/></svg></button></div><section id="speedo" aria-label="How fast the room writes"><div class="sp-read"><p class="sp-num"><b id="sp-tps" aria-live="off"></b></p><p id="sp-unit" class="sp-sub"></p></div><div class="sp-hist"><p class="sp-cap"><span>recent answers</span><span id="sp-gain"></span></p><ol id="sp-hist" class="empty" aria-label="Speed of recent answers"></ol></div><div class="sp-side"><p class="sp-mod"><b id="sp-model"></b><span id="sp-params"></span></p><ol id="sp-events" aria-label="Room events"></ol></div></section><ul id="sp-devs" aria-label="What each device does"></ul><div id="sp-share" hidden></div><div class="sm-strip" id="sm-body" aria-hidden="true"></div><div class="sm-track dev-only"></div></div>
       <div class="mode-row"><div id="mode-bar" role="tablist" aria-label="room mode" hidden><button id="mode-chat" role="tab" type="button" aria-selected="true" aria-controls="chatpane">Chat</button><button id="mode-code" data-twinkle role="tab" type="button" aria-selected="false" aria-controls="code-pane">Code</button></div></div>
     </div>
     <div id="chat-log" class="dev-only"></div>
@@ -1964,13 +2091,15 @@
           <div id="ai-ladder" role="radiogroup" aria-label="Model"></div>
           <span id="ai-status"></span>
           <p class="ap-note" id="ap-note">Each device downloads only its own layers, once. They stay cached for next time.</p>
-          <button id="ai-start" class="primary">Start the model</button>
+          <div class="ai-go"><button id="ai-start" class="primary">Start the model</button></div>
           <button id="ai-give" type="button" hidden>Give 4 GB from this device</button>
-          <p id="ai-short" role="status" hidden></p>
+          <button id="ai-allow-disk" type="button" hidden>Allow disk storage</button>
+          <p id="ai-short" role="status" tabindex="-1" hidden></p>
           <p id="ai-why" hidden>No device in this room can run a model: none has WebGPU. Join from a laptop or desktop in Chrome or Edge (or Safari 26) to start one.</p>
           <p id="start-why" class="sr-only"></p>
           <div id="redeal-why" hidden></div>
           <button id="ai-redeal" type="button" hidden>Re-deal the layers</button>
+          <button id="ai-redeal-skip" type="button" hidden>Not now</button>
         </div>
         <div id="ai-loading" style="display:none">
           <div id="ldg-title"></div>
@@ -1981,34 +2110,46 @@
       <div class="ap-side">
         <section class="ap-pool" aria-label="The room's memory">
           <h3 class="ap-k"><span>The room pools</span><b id="ap-total">0 GB</b></h3>
+          <p class="ap-bk" id="ap-gpu-k" hidden><span>GPU memory</span></p>
           <div id="ap-meter" aria-hidden="true"><div class="apm-fill"></div><div class="apm-ticks"></div></div>
           <p id="ap-need" hidden></p>
+          <p class="ap-bk" id="ap-store-k" hidden><span>Storage</span><b id="ap-store-n"></b></p>
+          <div id="ap-smeter" class="apm" aria-hidden="true" hidden><div class="apm-fill"></div></div>
+          <p id="ap-store" aria-live="polite" hidden></p>
+          <p id="ap-store-fix" class="ap-no" hidden></p>
           <ul id="ap-devs" aria-label="What each device gives"></ul>
         </section>
         <section class="ap-me" id="ap-me" aria-label="This device">
-          <h3 class="ap-k"><span>This device gives</span></h3>
+          <p class="ap-k ap-for" id="ap-for" hidden></p>
+          <h3 class="ap-k"><span id="ap-me-k">This device gives</span></h3>
           <div class="ap-step" id="ap-step"><button class="step" id="ap-minus" type="button" aria-label="Less memory">&minus;</button><input id="ap-gb" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" aria-label="Memory this device gives, in GB" value="1"><span class="u">GB</span><button class="step" id="ap-plus" type="button" aria-label="More memory">+</button></div>
           <p class="ap-me-hint" id="ap-me-hint" hidden></p>
           <p class="ap-covers" id="ap-covers">A pledge is a promise: this device never holds more. It covers the layers it holds and their context memory, and on the device that hosts the model also the embedding and output head.</p>
           <p class="ap-no" id="ap-cap" hidden></p>
           <p class="ap-no" id="ap-no" hidden>This browser can't use its graphics chip, so this device can chat but not help run the model.</p>
+          <div class="dk-rows" id="ap-flash" tabindex="-1" hidden></div>
         </section>
         <section class="ap-room" id="side-room" aria-label="Invite more devices">
           <div id="ap-qr" aria-hidden="true"></div>
           <div class="ap-inv">
             <h3 class="ap-k"><span>Invite more devices</span></h3>
             <p class="ap-code"><span id="side-code" title="Invite a device">----</span></p>
-            <p class="side-hint">Scan it, or type the code on another device. Each device adds the memory it gives.</p>
+            <p class="side-hint" id="side-hint">Scan it, or type the code on another device. Each device adds the memory it gives.</p>
             <div class="ap-btns"><button type="button" id="ap-copy">Copy link</button><button type="button" data-invite>Full-size QR</button></div>
           </div>
         </section>
       </div>
     </div>
-    <div id="load-card">
-      <div class="lc-head"><svg class="dl" viewBox="0 0 24 24" aria-hidden="true"><circle cx="3.4" cy="3.4" r="1.8" style="--rc:0"/><circle cx="10.2" cy="3.4" r="1.99" style="--rc:1"/><circle cx="18.5" cy="3.4" r="2.38" style="--rc:2"/><circle cx="3.4" cy="10.2" r="1.99" style="--rc:1"/><circle cx="10.2" cy="10.2" r="2.38" style="--rc:2"/><circle cx="18.5" cy="10.2" r="2.94" style="--rc:3"/><circle cx="3.4" cy="18.5" r="2.38" style="--rc:2"/><circle cx="10.2" cy="18.5" r="2.94" style="--rc:3"/><circle cx="18.5" cy="18.5" r="3.9" style="--rc:4"/></svg><div class="lc-h"><p class="lc-t"><span id="lc-verb">Loading</span> <span id="lc-model"></span></p><p class="lc-note">Each device downloads only its own layers.</p></div><span id="lc-sum"></span></div>
+    <div id="load-card" role="region" aria-label="Starting the model">
+      <div class="lc-top"><svg class="dl" viewBox="0 0 24 24" aria-hidden="true"><circle cx="3.4" cy="3.4" r="1.8" style="--rc:0"/><circle cx="10.2" cy="3.4" r="1.99" style="--rc:1"/><circle cx="18.5" cy="3.4" r="2.38" style="--rc:2"/><circle cx="3.4" cy="10.2" r="1.99" style="--rc:1"/><circle cx="10.2" cy="10.2" r="2.38" style="--rc:2"/><circle cx="18.5" cy="10.2" r="2.94" style="--rc:3"/><circle cx="3.4" cy="18.5" r="2.38" style="--rc:2"/><circle cx="10.2" cy="18.5" r="2.94" style="--rc:3"/><circle cx="18.5" cy="18.5" r="3.9" style="--rc:4"/></svg><p class="lc-eyebrow"></p></div>
+      <h2 class="lc-hl" aria-live="polite">Getting ready…</h2>
+      <p class="lc-sent"></p>
+      <div class="lc-bar" role="progressbar" aria-label="Starting the model" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="track"><div class="fill"></div></div><span class="pct">0%</span></div>
+      <p class="lc-sub" hidden></p>
+      <div class="lc-ask" id="lc-ask" role="group" aria-labelledby="lc-ask-q" hidden><p class="q" id="lc-ask-q"></p><p class="h" id="lc-ask-h"></p><div class="lc-actions"><button type="button" class="primary" id="lc-ask-yes">Save</button><button type="button" id="lc-ask-no">No</button></div></div>
       <div id="lc-rows"></div>
-      <div id="lc-strip" aria-hidden="true"></div>
-      <p id="lc-status" aria-live="polite"></p>
+      <p class="lc-foot"></p>
+      <div class="lc-actions" id="lc-actions" hidden><button type="button" class="primary" id="lc-retry">Try again</button><button type="button" id="lc-pick">Pick another model</button></div>
     </div>
     <div id="ai-output" role="log" aria-live="polite" aria-label="Conversation"></div>
     <div id="chat-tools" hidden>
@@ -2111,6 +2252,13 @@
     <div class="row"><button id="room-over-new" type="button" class="primary">Start a new room</button></div>
   </div>
 </div>
+<div id="disk-ask" class="overlay" hidden>
+  <div class="sheet" role="alertdialog" aria-modal="true" aria-labelledby="disk-ask-h" aria-describedby="disk-ask-why">
+    <h2 id="disk-ask-h">Save this model to this device?</h2>
+    <div class="k" id="disk-ask-why"></div>
+    <div class="row"><button id="disk-ask-allow" type="button" class="primary">Download and save</button><button id="disk-ask-no" type="button">Not now</button></div>
+  </div>
+</div>
 <div id="leave" class="overlay" hidden>
   <div class="sheet" role="alertdialog" aria-modal="true" aria-labelledby="leave-h" aria-describedby="leave-why">
     <h2 id="leave-h">Leave the room?</h2>
@@ -2129,7 +2277,7 @@
       <div class="cs-stage"><canvas id="cs-flow" aria-hidden="true"></canvas><span class="cs-ring" id="cs-ring" aria-hidden="true"></span><svg id="cs-logo" viewBox="0 0 24 24" aria-hidden="true"></svg></div>
       <div class="cs-text">
         <div class="cs-say" aria-live="polite"><h1 id="cs-title">Standing by</h1><p id="cs-sub"></p></div>
-        <p id="cs-live" hidden><span class="cs-hopk"><i class="cs-hop" aria-hidden="true"></i>hop</span><span><b id="cs-rate">0</b> tok/s</span><span><b id="cs-tok">0</b> tokens here</span><span><b id="cs-ms">-</b> per hop</span></p>
+        <p id="cs-live" class="dev-only" hidden><span class="cs-hopk"><i class="cs-hop" aria-hidden="true"></i>hop</span><span><b id="cs-rate">0</b> tok/s</span><span><b id="cs-tok">0</b> tokens here</span><span><b id="cs-ms">-</b> per hop</span></p>
         <div id="cs-strip" aria-hidden="true"></div>
         <p id="cs-api" hidden><i aria-hidden="true"></i><span id="cs-api-t"></span></p>
       </div>

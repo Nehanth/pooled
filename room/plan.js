@@ -64,15 +64,102 @@ function splitWithin(L, caps, max) {
   return { assigned, ranges: rangesOf(assigned), short: 0 };
 }
 
+// ---------------- layer costs: one size for every layer, or each layer its own ----------------
+// Every function below that takes `layerBytes` takes either a number (every layer costs that: the Qwen 3 / 3.5 / 3.6
+// rooms, the tests' toy models) or per-layer bytes (an array or Float64Array of L: Qwen3.8-Flash-Next, room/models.js
+// flashLayerCost: its layers 0-5 are heavier, its QSA layers carry K / V that grow with the context, its DeltaNet layers
+// a fixed state). With per-layer bytes, what n layers cost depends on where they are, as what they park does
+// (offloadAt): `pos` says it the same way:
+//   a number: the range ends there (exact)
+//   { lo, fixed: true }: the range starts at lo (the host's starts at 0: exact)
+//   { lo } or null: it starts at lo or later (not dealt yet): the heaviest n consecutive layers that could be its range
+// So a device's cap in layers is exact for the host and, for every other device, holds for whichever range the deal
+// then gives it (every range past the host's starts at layer 1 or later): no range is ever moved after the deal, and
+// each device's `held` is its range's exact sum. A number gives exactly the arithmetic of one size per layer.
+// costOf(layerBytes) -> { uniform, L, span(lo, hi), at(n, pos), fitN(bytes, pos), avg, off, resident(n, m, pos, E) }:
+//   at(n, pos): what n layers at pos cost; fitN(bytes, pos): the most layers at pos within bytes; avg: a layer's
+//   average; off: per-layer costs' offVram / offRam as costs of their own (room/models.js flashLayerCost), else null;
+//   resident(n, m, pos, E): what n layers at pos keep on the GPU with the experts of their last m offloaded: each
+//   offloaded layer's own experts when the costs carry them (flashLayerCost's experts: Flash's layers 6-47 have 52 MB
+//   fewer than layers 0-5), else E each (expertSizes: a profile's E)
+const costCache = new WeakMap();
+const HOST_POS = { lo: 0, fixed: true }, PEER_POS = { lo: 1 };
+export function costOf(layerBytes) {
+  if (layerBytes && typeof layerBytes === "object") {
+    let C = costCache.get(layerBytes);
+    if (!C) costCache.set(layerBytes, C = perLayerCost(layerBytes));
+    return C;
+  }
+  const b = +layerBytes || 0;
+  return { uniform: true, L: Infinity, span: (lo, hi) => (hi - lo) * b, at: (n) => n * b, fitN: (bytes) => (b > 0 && bytes > 0 ? Math.floor(bytes / b + 1e-9) : 0), avg: b, off: null,
+    resident: (n, m, pos, E) => n * b - m * E };
+}
+// c.once / c.onceAt (optional): bytes a device keeps once when its range holds any layer flagged in onceAt (Flash: the QSA
+// score scratch, flashLayerCost), counted in every range's sum that holds one
+function perLayerCost(c, withOff = true) {
+  const L = c.length, pre = new Float64Array(L + 1), worstMemo = new Map();
+  for (let i = 0; i < L; i++) pre[i + 1] = pre[i] + (+c[i] || 0);
+  const once = c.once > 0 && c.onceAt?.length === L ? c.once : 0, opre = new Uint16Array(L + 1);
+  if (once) for (let i = 0; i < L; i++) opre[i + 1] = opre[i] + (c.onceAt[i] ? 1 : 0);
+  const sum = (lo, hi) => pre[hi] - pre[lo] + (once && hi > lo && opre[hi] > opre[lo] ? once : 0);
+  const span = (lo, hi) => (lo < 0 || hi > L || hi < lo ? Infinity : sum(lo, hi));
+  const worst = (n, lo0 = 0) => {
+    if (n <= 0) return 0;
+    if (lo0 + n > L) return Infinity;
+    const k = n * (L + 1) + lo0;
+    let w = worstMemo.get(k);
+    if (w === undefined) { w = 0; for (let s = lo0; s + n <= L; s++) w = Math.max(w, sum(s, s + n)); worstMemo.set(k, w); }
+    return w;
+  };
+  const at = (n, pos = null) => {
+    if (!(n > 0)) return 0;
+    const hi = typeof pos === "number" ? pos : pos?.fixed ? (pos.lo || 0) + n : null;
+    return hi != null ? span(hi - n, hi) : worst(n, pos?.lo || 0);
+  };
+  const fitN = (bytes, pos = null) => { let n = 0; while (n < L && at(n + 1, pos) <= bytes + 1e-6) n++; return n; };
+  const off = withOff && c.offVram && c.offRam ? { vram: perLayerCost(c.offVram, false), ram: perLayerCost(c.offRam, false) } : null;
+  // the experts' prefix sums (per-layer costs that carry them), and the worst resident part of n layers starting at lo0
+  // or later with their last m offloaded
+  const ex = withOff && c.experts?.length === L ? Float64Array.from(c.experts) : null, epre = new Float64Array(L + 1), resMemo = new Map();
+  if (ex) for (let i = 0; i < L; i++) epre[i + 1] = epre[i] + ex[i];
+  const resident = (n, m, pos, E) => {
+    if (!ex) return at(n, pos) - m * E;
+    const hi = typeof pos === "number" ? pos : pos?.fixed ? (pos.lo || 0) + n : null;
+    if (hi != null) return span(hi - n, hi) - (epre[hi] - epre[hi - m]);
+    const lo0 = pos?.lo || 0;
+    if (lo0 + n > L) return Infinity;
+    const k = (n * (L + 1) + m) * (L + 1) + lo0;
+    let w = resMemo.get(k);
+    if (w === undefined) { w = -Infinity; for (let s = lo0; s + n <= L; s++) w = Math.max(w, sum(s, s + n) - (epre[s + n] - epre[s + n - m])); resMemo.set(k, w); }
+    return w;
+  };
+  return { uniform: false, L, span, at, fitN, avg: L ? sum(0, L) / L : 0, off, resident };
+}
+// The layers' total bytes: L x a number, or the per-layer bytes' sum
+export const layersTotal = (layerBytes, L) => (layerBytes && typeof layerBytes === "object" ? costOf(layerBytes).span(0, layerBytes.length) : L * (+layerBytes || 0));
+
 // How many whole layers each device can hold within its pledge. pledges: bytes each device lends
-// (host first); layerBytes: one layer with its share of the KV cache at the room's context;
+// (host first); layerBytes: one layer with its share of the KV cache at the room's context, or each layer's own
+// (costOf: the host's from layer 0, every other device's the heaviest range it could be dealt);
 // hostBytes: what the model host holds besides its layers (the embedding, the output head, the
 // draft block: room/models.js hostHeldBytes). A pledge is a promise: nobody is dealt more than this.
+// With per-layer costs the last device that can hold a layer is sized on the range ending at layer L, exactly: every
+// deal (planSplit, planForSpeed, dealOffload, placeNgram) keeps the host-first order, so when it holds layers its
+// range is the tail. A device between them keeps the heaviest window (it could start anywhere past the host's).
 export function layerCaps(pledges, layerBytes, hostBytes = 0) {
-  return pledges.map((p, i) => {
-    const b = (Number.isFinite(p) && p > 0 ? p : 0) - (i === 0 ? hostBytes : 0);
-    return layerBytes > 0 && b > 0 ? Math.floor(b / layerBytes + 1e-9) : 0;
-  });
+  const C = costOf(layerBytes);
+  const b = pledges.map((p, i) => (Number.isFinite(p) && p > 0 ? p : 0) - (i === 0 ? hostBytes : 0));
+  const caps = b.map((x, i) => (C.avg > 0 && x > 0 ? C.fitN(x, i === 0 ? HOST_POS : PEER_POS) : 0));
+  const t = lastPeer(b, C);
+  if (t) caps[t.i] = t.n;
+  return caps;
+}
+// The last device past the host that holds a layer of the tail, and how many it holds there ({ i, n }); null with one
+// size per layer (where a range is does not matter) or when none can
+function lastPeer(b, C) {
+  if (C.uniform || !(C.avg > 0)) return null;
+  for (let i = b.length - 1; i >= 1; i--) { const n = b[i] > 0 ? C.fitN(b[i], C.L) : 0; if (n >= 1) return { i, n }; }
+  return null;
 }
 
 // Whether a room's pledges hold a model, and if not by how much they fall short. Same arguments as
@@ -103,11 +190,13 @@ function residentFit(L, pledges, layerBytes, hostBytes) {
   const missing = Math.max(0, L - has, hostOk ? 0 : 1);
   if (!missing) return { fits: true, caps, missing: 0, short: 0, raise: caps.map(() => 0) };
   const p = (i) => (Number.isFinite(pledges[i]) && pledges[i] > 0 ? pledges[i] : 0);
-  const others = has - caps[0];
+  const others = has - caps[0], C = costOf(layerBytes);
+  // the last device holding layers is sized on the tail (layerCaps)
+  const last = C.uniform ? -1 : caps.reduce((j, c, i) => (i > 0 && c >= 1 ? i : j), -1);
   const raise = caps.map((c, i) => {
-    if (i === 0) return hostBytes + Math.max(1, L - others) * layerBytes - p(0);
+    if (i === 0) return hostBytes + C.at(Math.max(1, L - others), HOST_POS) - p(0);
     if (!hostOk) return Infinity;
-    return (c + (L - has)) * layerBytes - p(i);
+    return C.at(c + (L - has), i === last ? C.L : PEER_POS) - p(i);
   }).map((b) => (b === Infinity ? b : Math.max(1, Math.ceil(b))));
   return { fits: false, caps, missing, short: Math.min(...raise), raise };
 }
@@ -133,6 +222,36 @@ const offloadOn = (off) => !!off && off.expertBytes > 0 && (off.ram || []).some(
 // 2 GiB: the 3-tier simulator's T1 for the 122B and Flash rooms (docs/bench-log.md 2026-10-11, tests/sim/tiersim.js).
 export const DISK_RAM_MIN = 2 * 2 ** 30;
 const diskOn = (off) => offloadOn(off) && (off.disk || []).some(Boolean);
+// A disk-only device (off.diskOnly[i]: a browser tab with expert offload's OPFS tier, engine/expert_opfs.js; the page
+// sets meta.tabDisk, room/pledge.js tabDiskGB): its GPU shares the computer's memory, so it never parks experts in "RAM"
+// (that is the memory its pledge already lends): every layer it offloads reads its experts from disk, and its RAM
+// (meta.tabDisk.ramGB) pays only for the spare and T1, which has no minimum there (the 3-tier simulator: an inclusive
+// T1 under a bigger VRAM pool gains under 3%, docs/bench-log.md 2026-10-11). It counts only in roomFit's disk pass, never as a device that parks. Which
+// layers it offloads is chosen by tabDiskCost (the fewest m starve every pool: see offloadPlan), not the fewest.
+const diskOnlyAt = (off, i) => !!off?.diskOnly?.[i];
+// The pool's hit rate by the fraction of a layer's experts it caches: Qwen3.8-Flash-Next's recorded routing (decode,
+// chat / code / multiturn, the per-layer LRU of ExpertStore.plan; docs/bench-log.md 2026-10-11), linear between the
+// points. An estimate for any MoE: it only ranks offload plans (tabDiskCost), it promises nothing.
+const HIT_CURVE = [[0, 0], [0.0625, 0.591], [0.125, 0.713], [0.17, 0.777], [0.25, 0.854], [0.27, 0.867], [0.5, 0.94], [1, 1]];
+export function poolHitRate(frac) {
+  const f = Math.max(0, Math.min(1, frac));
+  for (let i = 1; i < HIT_CURVE.length; i++) {
+    const [f1, h1] = HIT_CURVE[i], [f0, h0] = HIT_CURVE[i - 1];
+    if (f <= f1) return h0 + (h1 - h0) * (f - f0) / (f1 - f0);
+  }
+  return 1;
+}
+// A disk-only device's per-token cost (ms, modelled) of offloading m of its layers with `slots` experts cached each:
+// a cut per offloaded layer (TAB_CUT_MS: 0.27 ms on Metal, #351) and the misses each read from OPFS (one expert's
+// record at TAB_DISK_GBPS, below the Mac's ~10 GB/s cold reads: a miss also waits for its upload). K: experts a token
+// picks. Offloading one more layer frees a whole layer's experts for the pools, so on a pledge well under the model a
+// deal that offloads every layer (Mac alone: 48 layers, ~140 slots, ~87% hits) beats the fewest (36 layers at 16 slots,
+// ~48%) by about 3x in misses.
+export const TAB_CUT_MS = 0.3, TAB_DISK_GBPS = 6;
+export function tabDiskCost(m, slots, nExp, K, perExpBytes) {
+  const miss = m * K * (1 - poolHitRate(slots / nExp));
+  return m * TAB_CUT_MS + miss * perExpBytes / (TAB_DISK_GBPS * 1e6);
+}
 // The experts' sizes, ExpertStore's way (engine/expert_store.js). ex: room/models.js expertsOf's profile
 // ({ E, nExp, slices: per layer, one expert's six parked slices }), or a number: every layer's experts that many bytes
 // in the file and parked alike (an estimate; the tests' toy models).
@@ -162,11 +281,17 @@ const diskOn = (off) => offloadOn(off) && (off.disk || []).some(Boolean);
 export const OFFLOAD_CKPT_SLOTS = 8;           // a room node host keeps 4 answer + 4 pinned checkpoints (ckpt.js CKPT_DEFAULTS)
 export const OFFLOAD_CKPT_TOKENS = 32768;      // their KV rows: a 16k-token agent prompt pinned, and its turn checkpoint
 export const OFFLOAD_RAM_BASE = 1.5 * 2 ** 30; // the PC's process past its parked experts: 1.6 GB
-function offloadSpare(p, n) {
+// C, pos (optional): the deal's layer costs (costOf) and where the n layers are. A profile with byLayer
+// (Qwen3.8-Flash-Next: room/models.js flashOffload) takes its checkpoints' part from them when they have it
+// (flashLayerCost's offVram / offRam: the shared flashCkptReserve, counted once), else from kvPos x ckptTokens.
+function offloadSpare(p, n, C = null, pos = null) {
   if (!(p.work > 0)) return { vram: 0, ram: 0 };
-  const st = p.state || 0, kv = p.kvPos || 0;
-  return { vram: p.work + n * (st * (1 + OFFLOAD_CKPT_SLOTS) + kv * OFFLOAD_CKPT_TOKENS),
-    ram: OFFLOAD_RAM_BASE + n * (st + kv * OFFLOAD_CKPT_TOKENS / 2) };
+  const st = p.state || 0;
+  if (p.byLayer && C?.off) return { vram: p.work + n * st + C.off.vram.at(n, pos), ram: OFFLOAD_RAM_BASE + C.off.ram.at(n, pos) };
+  // ckptTokens: a model whose context is shorter keeps fewer KV rows in its checkpoints (Qwen3.8-Flash-Next: 8 x 2048)
+  const kv = p.kvPos || 0, T = p.ckptTokens > 0 ? p.ckptTokens : OFFLOAD_CKPT_TOKENS;
+  return { vram: p.work + n * (st * (1 + OFFLOAD_CKPT_SLOTS) + kv * T),
+    ram: OFFLOAD_RAM_BASE + n * (st + kv * T / 2) };
 }
 export { offloadSpare as offloadSpareOf };
 const exCache = new WeakMap();
@@ -178,11 +303,13 @@ function expertSizes(ex, nExp = OFFLOAD_EXPERTS) {
     const pre = [0]; sl.forEach((a, i) => { pre[i + 1] = pre[i] + a.reduce((x, y) => x + y, 0) * N; });
     const maxSlice = Math.max(0, ...sl.flat());
     const bad = (lo, hi) => !(lo >= 0 && hi <= L && hi >= lo);
-    X = { E: +ex.E || 0, nExp: N, L, spare: (n) => offloadSpare(ex, n),
+    // region: false (Qwen3.8-Flash-Next's engine builds its store without one): none is set aside. K: experts a token picks
+    X = { E: +ex.E || 0, nExp: N, L, K: +ex.K || 8, spare: (n, C, pos) => offloadSpare(ex, n, C, pos),
       ramOf: (park, m) => { const bufs = Math.ceil(park / 2 ** 30) + 1; return park + bufs * maxSlice + (6 * m + bufs) * 256 + 4096; },
       park: (lo, hi) => (bad(lo, hi) ? Infinity : pre[hi] - pre[lo]),
       region: (lo, hi) => {
         if (bad(lo, hi)) return Infinity;
+        if (ex.region === false) return 0;
         let r = 0;
         for (let j = 0; j < 6; j++) { let m = 0; for (let l = lo; l < hi; l++) m = Math.max(m, sl[l][j]); r += m * N; }
         return r;
@@ -191,7 +318,7 @@ function expertSizes(ex, nExp = OFFLOAD_EXPERTS) {
     return X;
   }
   const E = +ex || 0;
-  return { E, nExp, L: Infinity, spare: () => ({ vram: 0, ram: 0 }), ramOf: (park) => park, park: (lo, hi) => (hi - lo) * E, region: () => E };
+  return { E, nExp, L: Infinity, K: 8, spare: () => ({ vram: 0, ram: 0 }), ramOf: (park) => park, park: (lo, hi) => (hi - lo) * E, region: () => E };
 }
 // Where a device's layers are (offloadNeed's pos): its last m layers are the ones offloaded, so what they park depends
 // on where its range ends.
@@ -204,7 +331,9 @@ function expertSizes(ex, nExp = OFFLOAD_EXPERTS) {
 // d: of the m offloaded layers, the last d stay on disk (the disk tier): they take pool slots and the region like the
 // others, no parked RAM, and the device keeps DISK_RAM_MIN for T1.
 // -> { park, ramNeed, region, perExp: one expert of each offloaded layer (ExpertStore.build's perExp), resident }
-function offloadAt(X, n, m, layerBytes, pos, d = 0) {
+// tMin: T1's least size when d > 0 (DISK_RAM_MIN; 0 on a disk-only device)
+// layerBytes: a number or per-layer bytes (costOf): the n layers' resident part is theirs at pos.
+function offloadAt(X, n, m, layerBytes, pos, d = 0, tMin = DISK_RAM_MIN) {
   let all, park, region;
   const hi = typeof pos === "number" ? pos : pos?.fixed ? (pos.lo || 0) + n : null;
   if (hi != null) { all = X.park(hi - m, hi); park = d ? X.park(hi - m, hi - d) : all; region = X.region(hi - m, hi); }
@@ -216,9 +345,9 @@ function offloadAt(X, n, m, layerBytes, pos, d = 0) {
     if (!d) park = all;
     region = X.region(Math.min(s0, X.L), X.L);
   }
-  const sp = X.spare(n);
-  const ramNeed = (m - d > 0 ? X.ramOf(park, m - d) : 0) + sp.ram + (d > 0 ? DISK_RAM_MIN : 0);
-  return { park, ramNeed, ramSpare: sp.ram, vramSpare: sp.vram, region, perExp: all / X.nExp, resident: n * layerBytes - m * X.E + sp.vram };
+  const C = costOf(layerBytes), sp = X.spare(n, C, pos);
+  const ramNeed = (m - d > 0 ? X.ramOf(park, m - d) : 0) + sp.ram + (d > 0 ? tMin : 0);
+  return { park, ramNeed, ramSpare: sp.ram, vramSpare: sp.vram, region, perExp: all / X.nExp, resident: C.resident(n, m, pos, X.E) + sp.vram };
 }
 // the VRAM cache n layers with m offloaded leave in `bytes`, and the slots per offloaded layer it holds after the
 // region (ExpertStore.build: P = floor((vramBytes - region) / perExp), at most nExp)
@@ -231,9 +360,10 @@ function cacheAt(a, bytes, nExp) {
 // number); pos: where the device's range is (offloadAt).
 export function offloadNeed(n, bytes, ram, layerBytes, ex, minSlots = OFFLOAD_MIN_SLOTS, nExp = OFFLOAD_EXPERTS, pos = null) {
   if (!(n > 0)) return 0;
-  if (n * layerBytes <= bytes + 1e-6) return 0;
+  const C = costOf(layerBytes);
+  if (C.at(n, pos) <= bytes + 1e-6) return 0;
   const X = expertSizes(ex, nExp);
-  if (!(X.E > 0) || !(X.E < layerBytes)) return -1;
+  if (!(X.E > 0) || !(X.E < C.avg)) return -1;
   // n layers, m offloaded: their resident part + the region + minSlots experts per offloaded layer <= bytes; parked <= ram
   for (let m = 1; m <= n; m++) {
     const a = offloadAt(X, n, m, layerBytes, pos);
@@ -245,13 +375,16 @@ export function offloadNeed(n, bytes, ram, layerBytes, ex, minSlots = OFFLOAD_MI
 // offloadNeed with the disk tier: the fewest of n layers to offload for the VRAM, and of those the fewest to leave on
 // disk for the RAM. -> { m, d } ({ m: 0, d: 0 } when they fit without offload; d: 0 when parking alone holds them,
 // with offloadNeed's m), or null when they can't fit at all (the VRAM, or no RAM for the spare and T1).
-export function offloadNeedDisk(n, bytes, ram, layerBytes, ex, minSlots = OFFLOAD_MIN_SLOTS, nExp = OFFLOAD_EXPERTS, pos = null) {
-  if (!(n > 0) || n * layerBytes <= bytes + 1e-6) return { m: 0, d: 0 };
+// diskOnly (a disk-only device: diskOnlyAt): every offloaded layer is a disk layer ({ m, d: m }) and T1 has no minimum.
+export function offloadNeedDisk(n, bytes, ram, layerBytes, ex, minSlots = OFFLOAD_MIN_SLOTS, nExp = OFFLOAD_EXPERTS, pos = null, diskOnly = false) {
+  const C = costOf(layerBytes);
+  if (!(n > 0) || C.at(n, pos) <= bytes + 1e-6) return { m: 0, d: 0 };
   const X = expertSizes(ex, nExp);
-  if (!(X.E > 0) || !(X.E < layerBytes)) return null;
-  const fits = (m, d) => offloadAt(X, n, m, layerBytes, pos, d).ramNeed <= ram + 1e-6;
+  if (!(X.E > 0) || !(X.E < C.avg)) return null;
+  const fits = (m, d) => offloadAt(X, n, m, layerBytes, pos, d, diskOnly ? 0 : DISK_RAM_MIN).ramNeed <= ram + 1e-6;
   for (let m = 1; m <= n; m++) {
     if (cacheAt(offloadAt(X, n, m, layerBytes, pos), bytes, X.nExp).slots < minSlots) continue;   // (d leaves the VRAM as it is)
+    if (diskOnly) return fits(m, m) ? { m, d: m } : null;
     if (fits(m, 0)) return { m, d: 0 };
     if (!fits(m, m)) return null;   // not even the spare and T1: more layers don't help
     let lo = 1, hi = m;   // the fewest on disk: past d = 0 (no T1), RAM need falls as d grows
@@ -262,9 +395,10 @@ export function offloadNeedDisk(n, bytes, ram, layerBytes, ex, minSlots = OFFLOA
 }
 // The most layers (up to L) a device holds with offload (disk: with the disk tier too). bytes: VRAM for layers (pledge
 // less host tensors); pos: where its range starts (offloadAt).
-export function offloadCap(L, bytes, ram, layerBytes, ex, minSlots = OFFLOAD_MIN_SLOTS, pos = null, disk = false) {
-  let n = layerBytes > 0 && bytes > 0 ? Math.min(L, Math.floor(bytes / layerBytes + 1e-9)) : 0;
-  const can = disk ? (k) => offloadNeedDisk(k, bytes, ram, layerBytes, ex, minSlots, OFFLOAD_EXPERTS, pos) !== null
+export function offloadCap(L, bytes, ram, layerBytes, ex, minSlots = OFFLOAD_MIN_SLOTS, pos = null, disk = false, diskOnly = false) {
+  const C = costOf(layerBytes);
+  let n = C.avg > 0 && bytes > 0 ? Math.min(L, C.fitN(bytes, pos)) : 0;
+  const can = disk ? (k) => offloadNeedDisk(k, bytes, ram, layerBytes, ex, minSlots, OFFLOAD_EXPERTS, pos, diskOnly) !== null
     : (k) => offloadNeed(k, bytes, ram, layerBytes, ex, minSlots, OFFLOAD_EXPERTS, pos) >= 0;
   while (n < L && can(n + 1)) n++;
   return n;
@@ -274,10 +408,11 @@ const offEx = (off) => off.experts || off.expertBytes;
 // layers each device holds with offload where it can (off.ram[i] > 0), within its pledge otherwise; disk: with the disk
 // tier where it has one (off.disk[i]). The host's range starts at layer 0; every other device's after the host's
 // resident layers (dealOffload).
+// A disk-only device counts only in the disk pass, and only with its disk tier for this model (off.disk[i]).
 export function offloadCaps(L, pledges, layerBytes, hostBytes, off, disk = false) {
   const rc = layerCaps(pledges, layerBytes, hostBytes);
-  return pledges.map((_, i) => (off.ram?.[i] > 0
-    ? Math.max(rc[i], offloadCap(L, vramFor(pledges, hostBytes, i), off.ram[i], layerBytes, offEx(off), off.minSlots, i === 0 ? { lo: 0, fixed: true } : { lo: Math.min(rc[0], L) }, disk && !!off.disk?.[i]))
+  return pledges.map((_, i) => (off.ram?.[i] > 0 && (!diskOnlyAt(off, i) || (disk && !!off.disk?.[i]))
+    ? Math.max(rc[i], offloadCap(L, vramFor(pledges, hostBytes, i), off.ram[i], layerBytes, offEx(off), off.minSlots, i === 0 ? { lo: 0, fixed: true } : { lo: Math.min(rc[0], L) }, disk && !!off.disk?.[i], diskOnlyAt(off, i)))
     : rc[i]));
 }
 // What one device's n layers look like with offload: null when they fit its pledge as they are, else
@@ -302,7 +437,26 @@ export function offloadCaps(L, pledges, layerBytes, hostBytes, off, disk = false
 // rose from 35.5 to 40.8 per token; decode was within the shared GPU's noise (8.9-12.3 vs 9.9-10.3 tok/s). Disk reads
 // are the slowest tier on an NVMe PC, so the fewest m stays until a cold-cache run on the PC says otherwise.
 export const OFFLOAD_GOOD_SLOTS = 64;
-export function offloadPlan(n, bytes, ram, layerBytes, ex, minSlots = OFFLOAD_MIN_SLOTS, nExp = OFFLOAD_EXPERTS, pos = null, disk = false) {
+// diskOnly (a disk-only device, with disk): every offloaded layer reads from disk, T1 is all its RAM past the spare,
+// and m is the one tabDiskCost rates cheapest from the fewest that fit up to all n (not the fewest: on a unified-memory
+// tab a layer kept resident costs a whole layer's worth of pool slots in every offloaded layer).
+export function offloadPlan(n, bytes, ram, layerBytes, ex, minSlots = OFFLOAD_MIN_SLOTS, nExp = OFFLOAD_EXPERTS, pos = null, disk = false, diskOnly = false) {
+  if (disk && diskOnly) {
+    const nd = offloadNeedDisk(n, bytes, ram, layerBytes, ex, minSlots, nExp, pos, true);
+    if (!nd || nd.m <= 0) return null;
+    const X = expertSizes(ex, nExp);
+    let best = null;
+    for (let m = nd.m; m <= n; m++) {
+      const a = offloadAt(X, n, m, layerBytes, pos, m, 0), c = cacheAt(a, bytes, X.nExp);
+      if (c.slots < minSlots || !(a.ramNeed <= ram + 1e-6)) continue;
+      const cost = tabDiskCost(m, c.slots, X.nExp, X.K, a.perExp);
+      if (!best || cost < best.cost - 1e-9) best = { m, a, c, cost };
+    }
+    if (!best) return null;
+    const t1 = Math.max(0, Math.floor((ram - best.a.ramNeed) / 2 ** 20) * 2 ** 20);
+    return { layers: best.m, vramBytes: best.c.vram, ramBytes: 0, ramSpare: best.a.ramSpare, vramSpare: best.a.vramSpare, slots: best.c.slots,
+      diskLayers: best.m, diskRamBytes: t1, diskOnly: true };
+  }
   if (disk) {
     const nd = offloadNeedDisk(n, bytes, ram, layerBytes, ex, minSlots, nExp, pos);
     if (!nd || nd.m <= 0) return null;
@@ -376,15 +530,96 @@ function dealOffload({ L, layerBytes, hostBytes, pledges, phone, phoneLayers, of
   const assigned = used.map((i) => a.get(i)), ranges = rangesOf(assigned);
   const offload = used.map((i, k) => {
     if (!(off.ram?.[i] > 0)) return null;
-    const p = offloadPlan(assigned[k], vramFor(pledges, hostBytes, i), off.ram[i], layerBytes, offEx(off), off.minSlots, OFFLOAD_EXPERTS, ranges[k][1], !!fit.disk && !!off.disk?.[i]);
+    const dk = !!fit.disk && !!off.disk?.[i];
+    if (diskOnlyAt(off, i) && !dk) return null;   // (a disk-only device never parks: within its pledge, checked below)
+    const p = offloadPlan(assigned[k], vramFor(pledges, hostBytes, i), off.ram[i], layerBytes, offEx(off), off.minSlots, OFFLOAD_EXPERTS, ranges[k][1], dk, diskOnlyAt(off, i));
     return p && { ...p, lo: ranges[k][1] - p.layers, hi: ranges[k][1], ...(p.diskLayers > 0 ? { diskLo: ranges[k][1] - p.diskLayers } : {}) };
   });
   // (the caps hold for any range the deal gives: offloadCaps. Should a device still be dealt past its pledge without
   // a plan, the deal fails rather than break a promise)
   if (used.some((i, k) => assigned[k] > rc[i] && !offload[k])) return null;
   // a device that offloads holds its whole pledge (its layers' resident part, then the cache); its RAM apart
-  const held = used.map((i, k) => (offload[k] ? vramFor(pledges, hostBytes, i) : assigned[k] * layerBytes) + (i === 0 ? hostBytes : 0));
+  const C = costOf(layerBytes);
+  const held = used.map((i, k) => (offload[k] ? vramFor(pledges, hostBytes, i) : C.span(ranges[k][0], ranges[k][1])) + (i === 0 ? hostBytes : 0));
   return { fit, used, assigned, ranges, held, out, offload };
+}
+// ---------------- a disk-only tab host + a room node that parks: the split by modelled speed ----------------
+// One answer's tokens run through the devices one after another, so a token costs the sum of each device's part, and
+// the split is worth choosing per layer. dealOffload gives a disk-only tab (the Mac in the Flash demo) only what its
+// pledge holds before disk and the node the rest: with the Mac lending 20 GB the RTX 5070 node (--gb 10 --ram 43
+// --disk) got layers 14-47, 31 of them parked with 26 experts cached each (56-60% hits, ~180 copies from RAM a
+// token, one GPU round trip per parked layer): 54-70 ms a token there against 12-18 ms for the Mac's 14 layers, and
+// at a 12 GB lend the node also read 3 layers' experts from its disk. Here the host's share k is the one whose
+// modelled cost (tabCost + nodeCost) is lowest among the shares both devices can hold (offloadPlan, as dealOffload
+// plans them). Only for that room shape (two devices: the host a disk-only tab, the other a node that parks); every
+// other deal is dealOffload's. off.hostLayers (the page's ?hostlayers=, tests) sets k; off.speedSplit === false
+// (?flashsplit=0) keeps dealOffload's.
+// The constants (ms a token) are measured on the demo's machines (Mac Studio tab, RTX 5070 node; PR notes):
+//   TAB_LAYER_MS: a tab layer (14 layers 12-18 ms, the embedding and n-gram rows included); TAB_CUT2_MS: an offloaded
+//     layer's cut; TAB_MISS_MS: an expert read from OPFS into the pool (the Mac alone: ~100 reads a token for ~65 ms)
+//   NODE_LAYER_MS: a node layer (6 resident layers 4.7 ms a step); NODE_CUT_MS: a parked layer's cut (6 cuts +1.1 ms);
+//     NODE_MISS_MS: an expert copied from parked RAM (2.76 MB at ~30 GB/s); NODE_DISK_MISS_MS: one read from the
+//     node's model file (~3 GB/s cold)
+// The model only ranks splits; SPLIT_GAIN keeps dealOffload's unless another is clearly cheaper.
+export const TAB_LAYER_MS = 1.0, TAB_CUT2_MS = 0.3, TAB_MISS_MS = 0.67;
+export const SPLIT_GAIN = 0.1;
+export const NODE_LAYER_MS = 0.78, NODE_CUT_MS = 0.18, NODE_MISS_MS = 0.09, NODE_DISK_MISS_MS = 0.9;
+export function tabCost(n, plan, X) {
+  if (!plan) return n * TAB_LAYER_MS;
+  return n * TAB_LAYER_MS + plan.layers * TAB_CUT2_MS + plan.layers * X.K * (1 - poolHitRate(plan.slots / X.nExp)) * TAB_MISS_MS;
+}
+export function nodeCost(n, plan, X) {
+  if (!plan) return n * NODE_LAYER_MS;
+  const missPer = X.K * (1 - poolHitRate(plan.slots / X.nExp)), d = plan.diskLayers || 0;
+  return n * NODE_LAYER_MS + plan.layers * NODE_CUT_MS + missPer * ((plan.layers - d) * NODE_MISS_MS + d * NODE_DISK_MISS_MS);
+}
+function splitBySpeed(d, { L, layerBytes, hostBytes, pledges, off }) {
+  if (off.speedSplit === false || d.used.length !== 2) return null;
+  const [h, w] = d.used;
+  if (h !== 0 || !diskOnlyAt(off, h) || !off.disk?.[h] || diskOnlyAt(off, w) || !(off.ram?.[w] > 0)) return null;
+  const ex = offEx(off), X0 = expertSizes(ex, OFFLOAD_EXPERTS);
+  const X = { nExp: X0.nExp, K: X0.K, perExp: Number.isFinite(X0.L) ? X0.park(0, X0.L) / X0.L / X0.nExp : X0.E / X0.nExp };
+  const vh = vramFor(pledges, hostBytes, h), vw = vramFor(pledges, hostBytes, w);
+  // -> { k, hp, wp, cost } for the host holding layers [0, k), or null when one of them can't
+  // (layerBytes: one size, or since #380 each layer's own costs: costOf, as dealOffload; a plain k * layerBytes was NaN there)
+  const C = costOf(layerBytes);
+  const at = (k) => {
+    const nw = L - k;
+    if (k < 1 || nw < 1) return null;
+    const hb = C.span(0, k), wb = C.span(k, L);
+    const hp = hb <= vh + 1e-6 ? null : offloadPlan(k, vh, off.ram[h], layerBytes, ex, off.minSlots, OFFLOAD_EXPERTS, k, true, true);
+    if (hb > vh + 1e-6 && !hp) return null;
+    const wp = wb <= vw + 1e-6 ? null : offloadPlan(nw, vw, off.ram[w], layerBytes, ex, off.minSlots, OFFLOAD_EXPERTS, L, !!off.disk?.[w], false);
+    if (wb > vw + 1e-6 && !wp) return null;
+    return { k, hp, wp, cost: tabCost(k, hp, X) + nodeCost(nw, wp, X) };
+  };
+  let best = null;
+  if (Number.isInteger(off.hostLayers)) best = at(off.hostLayers);
+  else for (let k = 1; k < L; k++) { const c = at(k); if (c && (!best || c.cost < best.cost - 1e-9)) best = c; }
+  if (!best) return null;
+  // the model is coarse (a few ms either way at the 20 GB demo split, where the measured best was dealOffload's own):
+  // keep dealOffload's split unless another is modelled at least SPLIT_GAIN cheaper (or the share is forced)
+  const was = at(d.assigned[0]);
+  if (!Number.isInteger(off.hostLayers) && was && best.cost > was.cost * (1 - SPLIT_GAIN)) return null;
+  const assigned = [best.k, L - best.k], ranges = rangesOf(assigned);
+  const plan = (p, k) => p && { ...p, lo: ranges[k][1] - p.layers, hi: ranges[k][1], ...(p.diskLayers > 0 ? { diskLo: ranges[k][1] - p.diskLayers } : {}) };
+  const offload = [plan(best.hp, 0), plan(best.wp, 1)];
+  const held = [offload[0] ? vh : C.span(0, best.k), offload[1] ? vw : C.span(best.k, L)].map((b, k) => b + (d.used[k] === 0 ? hostBytes : 0));
+  return { ...d, assigned, ranges, held, offload, speed: { k: best.k, ms: +best.cost.toFixed(1), was: d.assigned[0] } };
+}
+
+// What a deal keeps on each device's disk, bytes per device index (host first, as pledges): the routed experts of the
+// layers it leaves on disk ([diskLo, hi): expBytes each) and the n-gram table on the device dealt its layer. A room
+// node reads them from its own model files; a tab copies them to its disk (room/flashdisk.js), so this is what a tab
+// stores. n: how many devices; a device dealt nothing stores 0.
+export function diskShares(deal, n, expBytes) {
+  const out = new Array(n).fill(0);
+  (deal?.used || []).forEach((i, k) => {
+    const o = deal.offload?.[k];
+    if (o && Number.isInteger(o.diskLo)) out[i] += (o.hi - o.diskLo) * expBytes;
+    if (deal.ngram?.at === k) out[i] += deal.ngram.bytes;
+  });
+  return out;
 }
 // What this room can run, smallest model first: [{ key, need, ok, short }]. short is how many
 // more GB the room needs for that model (0 when it fits).
@@ -503,18 +738,41 @@ export function pickModelHost(devices) {
 // GB for the screen, rounded up to a tenth so "short by" never undersells what is missing
 export const gbUp = (bytes) => Math.ceil(bytes / 2 ** 30 * 10 - 1e-9) / 10;
 
+// The least memory a room's devices must pledge for a model, by the planner's own fit check: the smallest total of
+// these pledges, scaled together, at which fitsAt(pledgesScaled) still holds (roomFit, with whatever offload and disk
+// tier the devices offer). For a model whose experts stream from disk (room/models.js DISK_COPY) that is the GPU
+// memory it needs, far below its size; the picker shows it as the model's need, so its number and its "fits" agree.
+// pledges: bytes, one per device; fitsAt(pledges) -> bool. -> { bytes, scaled } (scaled: the pledges at that total),
+// or null when no total up to maxScale times these pledges fits (or nobody pledges)
+export function minFitPledge(pledges, fitsAt, { maxScale = 16, iters = 24 } = {}) {
+  const total = pledges.reduce((a, b) => a + (b > 0 ? b : 0), 0);
+  if (!(total > 0)) return null;
+  const at = (k) => pledges.map((b) => b * k);
+  let lo = 0, hi = 1;
+  if (!fitsAt(at(1))) {
+    lo = 1;
+    while (hi < maxScale && !fitsAt(at(hi * 2))) { lo = hi * 2; hi *= 2; }
+    if (hi >= maxScale) return null;
+    hi *= 2;
+  }
+  for (let i = 0; i < iters; i++) { const mid = (lo + hi) / 2; if (fitsAt(at(mid))) hi = mid; else lo = mid; }
+  return { bytes: total * hi, scaled: at(hi) };
+}
+
 // The one sentence a room that is short for a model shows under Start (and the reason a start stops).
 // label: the model's short name; fit: roomFit's result (host first); names: the devices in the same
 // order; spareGB: how much more each device could still lend (0 for a phone at its cap). Names up to
-// two devices that could close the gap alone, the host's raise first when it is the smaller one.
-export function shortNote(label, fit, names = [], spareGB = []) {
+// two devices that could close the gap alone, the host's raise first when it is the smaller one. fix: what to do, in
+// the words of where it shows (the CLI's "raise a pledge" by default; the page passes PAGE_SHORT_FIX)
+export const PAGE_SHORT_FIX = "Invite a device, or give more GPU memory on the right";
+export function shortNote(label, fit, names = [], spareGB = [], fix = "Add a device or raise a pledge") {
   if (fit.fits) return "";
   // the pledges hold it, but no device that can take the n-gram table's layer has the disk for it (dealRoom ngram)
   if (fit.ngram) return `${label} needs ${gbUp(fit.ngram.bytes)} GB of free disk for its n-gram table on the device that holds layer ${fit.ngram.layer}, and the devices that could hold that layer don't have it. Free disk space there or add a device that has the room.`;
   const who = givers(fit, spareGB).slice(0, 2).map(({ i, b }) => `${names[i] || "a device"} could give ${gbUp(b)} GB more`);
   const head = `This room is ${gbUp(shortBy(fit, spareGB))} GB short for ${label}`;
   const host = fit.caps[0] < 1 ? `; the model host (${names[0] || "the biggest device"}) needs room for the embedding, the output head and a layer` : "";
-  return `${head}${host}. Add a device or raise a pledge${who.length ? `: ${who.join(", or ")}` : ""}.`;
+  return `${head}${host}. ${fix}${who.length ? `: ${who.join(", or ")}` : ""}.`;
 }
 // the devices that could close the gap alone, fewest bytes first: [{ i, b }]
 const givers = (fit, spareGB) => fit.raise.map((b, i) => ({ i, b })).filter(({ i, b }) => b < Infinity && gbUp(b) <= (spareGB[i] || 0) + 1e-9)
@@ -543,7 +801,10 @@ export function shortBy(fit, spareGB = []) {
 // tier (only when parking can't hold the model) diskLo (layers [diskLo, hi) stay in the file) and diskRamBytes (T1).
 // ngram (optional, Qwen3.8-Flash-Next): the n-gram table's placement (ngramFor, room/pledge.js): the device dealt its
 // layer must have the table on its own disk (placeNgram). The result then also has `ngram`.
-export function dealRoom({ L, layerBytes, hostBytes = 0, pledges, mode = "memory", ms = [], phone = [], phoneLayers = false, off = null, ngram = null }) {
+// layerCost (optional): each layer's own bytes (room/models.js flashLayerCost), in place of layerBytes: every check
+// and every range of the deal (caps, offload, the n-gram move, held) is then on those exact costs (costOf).
+export function dealRoom({ L, layerBytes, layerCost = null, hostBytes = 0, pledges, mode = "memory", ms = [], phone = [], phoneLayers = false, off = null, ngram = null }) {
+  if (layerCost) { layerBytes = layerCost; if (layerCost.length !== L) throw new Error(`dealRoom: ${layerCost.length} layer costs for ${L} layers`); }
   const d = dealLayers({ L, layerBytes, hostBytes, pledges, mode, ms, phone, phoneLayers, off });
   return ngram && d.used.length ? placeNgram(d, ngram, { layerBytes, hostBytes }) : d;
 }
@@ -551,7 +812,10 @@ function dealLayers({ L, layerBytes, hostBytes, pledges, mode, ms, phone, phoneL
   const fit = roomFit(L, pledges, layerBytes, hostBytes, off);
   const none = { fit, used: [], assigned: [], ranges: [], held: [], out: {} };
   if (!fit.fits) return none;
-  if (fit.offload) return dealOffload({ L, layerBytes, hostBytes, pledges, phone, phoneLayers, off, fit }) || { ...none, fit: { ...fit, fits: false } };
+  if (fit.offload) {
+    const d = dealOffload({ L, layerBytes, hostBytes, pledges, phone, phoneLayers, off, fit });
+    return (d && splitBySpeed(d, { L, layerBytes, hostBytes, pledges, off })) || d || { ...none, fit: { ...fit, fits: false } };
+  }
   const out = {};
   // a device whose pledge is under one layer holds none (the host always has room: fit says so)
   let idx = fit.caps.map((c, i) => i).filter((i) => i === 0 || fit.caps[i] >= 1);
@@ -575,8 +839,24 @@ function dealLayers({ L, layerBytes, hostBytes, pledges, mode, ms, phone, phoneL
     assigned = keep.map((k) => sp.assigned[k]); ranges = keep.map((k) => sp.ranges[k]);
     idx = keep.map((k) => idx[k]);
   }
-  const held = idx.map((i, k) => assigned[k] * layerBytes + (i === 0 ? hostBytes : 0));
+  const C = costOf(layerBytes);
+  const held = idx.map((i, k) => C.span(ranges[k][0], ranges[k][1]) + (i === 0 ? hostBytes : 0));
   return { fit, used: idx, assigned, ranges, held, out };
+}
+
+// The deal for a model host that loads without a load-time check (a room page's tab: room/models.js
+// flashTabHostMargin): it keeps `full` past its layers (their upload staging and scratch) while it holds a resident
+// layer, `small` when it offloads every layer it holds (their experts are never staged). deal(extra) -> dealRoom's
+// result with extra more host bytes. Returns the deal with `full`, or the one with `small` when that has the host
+// offloading every layer it holds (so a host that streams all its experts keeps its pool, and one with resident layers
+// its staging).
+export function dealWithHostMargin(deal, full, small = full) {
+  const a = deal(full);
+  if (!(small < full)) return a;
+  const allOff = (d) => !!(d.fit.fits && d.used.length && d.offload?.[0] && d.offload[0].lo === d.ranges[0][0]);
+  if (a.fit.fits && !allOff(a)) return a;
+  const b = deal(small);
+  return allOff(b) ? b : a;
 }
 
 // ---------------- the n-gram table (Qwen3.8-Flash-Next, roadmap/33) ----------------
@@ -611,7 +891,7 @@ export function placeNgram(d, ng, { layerBytes, hostBytes = 0 }) {
   } else if (k === 0 && layer >= 1 && can(used[1]) && caps[used[1]] >= a[1] + a[0] - 1) {
     a[1] += a[0] - 1; a[0] = 1;   // the next device takes the host's layers past the first
   } else return short;
-  const ranges = rangesOf(a), held = used.map((i, j) => a[j] * layerBytes + (i === 0 ? hostBytes : 0));
+  const C = costOf(layerBytes), ranges = rangesOf(a), held = used.map((i, j) => C.span(ranges[j][0], ranges[j][1]) + (i === 0 ? hostBytes : 0));
   const x = { ...d, used, assigned: a, ranges, held, out };
   const j = ngramHolder(ranges, layer);
   return j >= 0 && can(used[j]) ? done(x, j) : short;

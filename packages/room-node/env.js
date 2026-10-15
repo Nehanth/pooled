@@ -5,9 +5,11 @@
 // setupNode() is idempotent and must run before anything touches navigator.gpu or new Peer().
 
 import { setFlagsFromString } from "node:v8";
+import { runInNewContext } from "node:vm";
 import { measureCopyGBps } from "../../room/gpuspeed.js";
 import { DENSE_SPEC_V } from "../../room/lookup.js";
 import { DESK_MAX_GB, PLEDGE_MAX_GB } from "../../room/pledge.js";
+import { flashLongMeta } from "../../room/models.js";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import os from "node:os";
@@ -39,6 +41,22 @@ export function dawnFlagsFor(env = process.env, platform = process.platform) {
 // re-exec): V8 compiles nothing with Maglev after it, and what Node had already compiled with Maglev
 // before (path helpers while loading modules) predates the device.
 export const v8FlagsFor = (platform = process.platform) => (platform === "win32" ? ["--no-maglev"] : []);
+
+// A young-generation collection, for while this device waits for its next frame (roomnode.js, after it sends one;
+// off by default, POOLED_IDLE_GC=1 turns it on: in the Flash room it cut the PC's slow frames from 4-5 to 2-3 in five
+// answers, but the room's speed did not move past its WiFi noise, so it stays a switch until a wired run says more).
+// Each token leaves Dawn wrappers behind (command encoders and buffers, map promises: a few per expert cut, 31 cuts a token on the Flash demo's RTX 5070 share) that are still alive at the
+// scavenge that runs in the middle of the next token's GPU work, so they move to the old space and come back as
+// mark-compacts whose finalizers stall the process: 55-90 ms every ~0.5 s in a busy readback loop on that PC, and
+// 130-290 ms frames in a Flash room (6 of its 11 slow laps in five answers). A scavenge once the token is done (its
+// wrappers dead by then) keeps them out of the old space: the same loop's worst wait went from 88 to 21 ms.
+// --expose-gc set now gives the gc function to contexts made after it (vm.runInNewContext).
+let gcFn;
+export function minorGc() {
+  if (gcFn === undefined) { try { setFlagsFromString("--expose-gc"); gcFn = runInNewContext("gc"); } catch { gcFn = null; } }
+  try { gcFn?.({ type: "minor" }); } catch { gcFn = null; }
+}
+export const idleGcOn = (env = process.env) => env.POOLED_IDLE_GC === "1";
 
 // webgpu: an async loader for Dawn ({ create, globals }), for a caller that resolves it from its own
 // install (the pooled CLI: an optional package); default the npm "webgpu" package next to this one
@@ -102,13 +120,17 @@ export async function probeMeta(pledgeGB, { gbps = null, ramGB = 0, mem = null, 
     // the largest buffer this device can bind (shard.js asks for the adapter's limit): the host keeps
     // the room's context within every device's limit (room/models.js ctxForBinding)
     meta.maxBindMB = Math.floor(Math.min(a.limits.maxStorageBufferBindingSize, a.limits.maxBufferSize) / 2 ** 20);
+    // flashLong: this node loads Qwen3.8-Flash-Next with QSA when the host asks (ai-load.flash; room/models.js flashLongMeta)
+    meta.flashLong = flashLongMeta(meta.maxBindMB, { batch: flashBatchMode() !== "off" });
     meta.gbps = gbps != null ? Math.max(0, +gbps || 0) : await measureCopyGBps(a);
   }
   meta.phone = false;
   meta.contribGB = pledgeFor(pledgeGB, meta.maxBufGB);
   if (meta.webgpu && +ramGB > 0) {
     if (unifiedMemory(mem || hostMemory())) meta.noOffload = "unified memory";
-    else { meta.offload = true; meta.ramGB = ramFor(ramGB); }
+    // offloadFlash: this node's shard.js offloads Qwen3.8-Flash-Next's experts too (a 0.4.1 node refuses them, so a host
+    // deals it Flash offload only when it says so: room/pledge.js offloadFor)
+    else { meta.offload = true; meta.ramGB = ramFor(ramGB); meta.offloadFlash = true; }
   }
   if (disk) {
     if (meta.offload) { meta.disk = true; meta.local = [...local]; }
@@ -116,6 +138,31 @@ export async function probeMeta(pledgeGB, { gbps = null, ramGB = 0, mem = null, 
   }
   return meta;
 }
+// POOLED_QSA_ALWAYS=1: a test switch (shard.js loadFlash): a QSA Flash engine takes QSA's gathered attention on every
+// step, also below 2052 cells, where it gives dense attention's bits (the room's QSA == dense check)
+export const qsaAlways = (env = process.env) => env.POOLED_QSA_ALWAYS === "1";
+// Test switch POOLED_FLASH_BATCH (read by shard.js loadFlash): Qwen3.8-Flash-Next's batched passes for prompt frames
+// and a solo room's prompt (room/flash.js, engine/qwen4exp_batch.js). "0" turns them off (every column one decode step,
+// as before batched prefill: the gates compare a batched room with the same room per token); "exact" keeps the batch
+// on the bit-exact multi-column kernels (the same bits as "0", passes of 64); anything else, or unset: the wide kernels
+// (#377, the default). Not a user setting. -> "off" | "exact" | "wide"
+export function flashBatchMode(env = process.env) {
+  const v = String(env.POOLED_FLASH_BATCH ?? "").trim().toLowerCase();
+  return v === "0" || v === "false" || v === "off" ? "off" : v === "exact" ? "exact" : "wide";
+}
+// Test switch POOLED_FLASH_REGION=1 (shard.js loadFlash): a device with offloaded Flash experts takes the batched
+// passes' whole-layer region out of its expert cache whenever the pools keep OFFLOAD_MIN_SLOTS experts per layer
+// after it (by default only when they keep OFFLOAD_GOOD_SLOTS, which the deals seldom leave): so a gate can run an
+// offloaded worker batched. Not a user setting
+export const flashRegionForced = (env = process.env) => env.POOLED_FLASH_REGION === "1";
+// Test switch POOLED_FLASH_LAYERED=0 (shard.js loadFlash): batched passes over disk-tier layers go pass after pass
+// through every layer (each disk layer read once a pass) instead of layer by layer (engine/qwen4exp_batch.js
+// passesLayered: once for up to 4096 tokens; the same bits). Not a user setting
+export const flashLayered = (env = process.env) => env.POOLED_FLASH_LAYERED !== "0";
+// Test switch POOLED_FLASH_SHARED=0 (shard.js loadFlash): a device whose cache can't spare a whole-layer region runs its
+// prompt frames one column at a time instead of borrowing the region from its cache (engine/expert_store.js shared).
+// Not a user setting
+export const flashSharedRegion = (env = process.env) => env.POOLED_FLASH_SHARED !== "0";
 // whether the GPU shares the system's memory (detectMemory's kind; Apple silicon reads as unified there too)
 export const unifiedMemory = (mem) => mem?.kind === "unified";
 // detectMemory on this machine (nvidia-smi, amdgpu sysfs, the platform), or { kind: "unknown" } when it fails

@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { dawnFlagsFor, v8FlagsFor, probeMeta, unifiedMemory } from "../env.js";
+import { dawnFlagsFor, v8FlagsFor, probeMeta, unifiedMemory, qsaAlways, flashBatchMode, flashRegionForced } from "../env.js";
 
 const SKIP = "d3d_skip_shader_optimizations";
 test("dawnFlagsFor: DAWN_OPTS elsewhere, FXC's optimizer off on Windows", () => {
@@ -46,14 +46,26 @@ test("probeMeta: offload on a discrete GPU, never on unified memory", async () =
   try {
     const disc = await probeMeta(8, { gbps: 0, ramGB: 40, mem: { kind: "discrete", name: "RTX 5070", totalGB: 12, freeGB: 11 } });
     assert.equal(disc.offload, true); assert.equal(disc.ramGB, 40);
+    assert.equal(disc.offloadFlash, true, "this node offloads Flash too: hosts deal it Flash offload (room/pledge.js offloadFor)");
+    // flashLong: this node loads Flash with QSA (ai-load.flash); 2 GiB binds more than QSA's 411,000 positions need
+    assert.deepEqual(disc.flashLong, { ctx: 411000, kv: ["f32"], batch: 1 });   // (batched passes on unless POOLED_FLASH_BATCH=0)
     for (const mem of [{ kind: "unified", name: "NVIDIA GB10", totalGB: 119 }, { kind: "unified", name: "Apple silicon", totalGB: 64 }]) {
       const m = await probeMeta(8, { gbps: 0, ramGB: 40, mem });
       assert.equal(m.offload, undefined, mem.name); assert.equal(m.ramGB, undefined); assert.equal(m.noOffload, "unified memory");
       assert.equal(m.webgpu, true); assert.equal(m.contribGB, 8, "the pledge is unchanged");
     }
     assert.equal((await probeMeta(8, { gbps: 0, ramGB: 0, mem: { kind: "discrete" } })).offload, undefined, "--ram 0");
+    assert.equal(qsaAlways({}), false); assert.equal(qsaAlways({ POOLED_QSA_ALWAYS: "1" }), true); assert.equal(qsaAlways({ POOLED_QSA_ALWAYS: "0" }), false);
     assert.ok(unifiedMemory({ kind: "unified" }) && !unifiedMemory({ kind: "discrete" }) && !unifiedMemory(null));
   } finally {
     if (had) Object.defineProperty(globalThis.navigator, "gpu", had); else delete globalThis.navigator.gpu;
   }
+});
+
+test("POOLED_FLASH_BATCH / POOLED_FLASH_REGION: the Flash batched-prefill test switches", () => {
+  for (const [v, want] of [[undefined, "wide"], ["", "wide"], ["1", "wide"], ["wide", "wide"], ["0", "off"], ["false", "off"], [" OFF ", "off"], ["exact", "exact"], ["Exact", "exact"]])
+    assert.equal(flashBatchMode(v === undefined ? {} : { POOLED_FLASH_BATCH: v }), want, String(v));
+  assert.equal(flashRegionForced({}), false);
+  assert.equal(flashRegionForced({ POOLED_FLASH_REGION: "1" }), true);
+  assert.equal(flashRegionForced({ POOLED_FLASH_REGION: "0" }), false);
 });
