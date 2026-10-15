@@ -57,7 +57,7 @@ Configure these repository Secrets before distribution:
 | `ANDROID_KEY_ALIAS` | Signing alias |
 | `ANDROID_KEY_PASSWORD` | Key password |
 
-A missing signing secret **fails tag delivery**; no unsigned artifact is published as a release. The key is decoded only into runner temporary storage and deleted afterwards. Retain the real signing key outside CI: future updates require the same identity. No production key is generated or committed by this port.
+A missing signing secret **fails tag delivery**; no unsigned artifact is published as a release. The key is decoded only into runner temporary storage and deleted afterwards. Retain the real signing key outside CI: future updates require the same identity. Signing keys and recovery credentials are kept outside the repository and are never bundled with the app.
 
 Once the workflow is on the remote branch and signing Secrets are configured:
 

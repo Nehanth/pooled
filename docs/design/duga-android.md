@@ -19,7 +19,7 @@ This adds an isolated `android/` Gradle build, AndroidX WebKit and Android test 
 
 ## Validation and delivery
 
-Create an installable debug APK (development signing, not a Play Store/release identity), a reproducible Gradle wrapper, asset-sync checks, URL/message policy tests, Android lint and emulator smoke coverage when the environment supports it. Record skipped checks and system-WebView/GPU limits. Do not commit signing keys, SDK installations, generated web assets, models or build outputs. A production signing identity, app-link domain association and foreground compute service remain future decisions.
+Create an installable debug APK (development signing, not a Play Store/release identity), a reproducible Gradle wrapper, asset-sync checks, URL/message policy tests, Android lint and emulator smoke coverage when the environment supports it. Record skipped checks and system-WebView/GPU limits. Do not commit signing keys, SDK installations, generated web assets, models or build outputs. Release signing is configured through repository Secrets, with an owner-controlled recovery backup outside source/CI. App-link domain association and foreground compute service remain future decisions.
 
 ## References
 
@@ -66,3 +66,7 @@ Validation: the Lavapipe-exported reference reproduced ordinary captured output 
 The Android adapter returns exact generated IDs to the assistant controller, which retains them with each in-memory chat turn while the native GPU model is released on backgrounding. A reloaded model prefers these IDs over re-tokenized display text. No new persistent store or account identity is introduced. Context bounds reject prompts with no remaining response budget before prefill. Node tests exercise cancellation, zero-budget rejection and noncanonical tokenization across model reload; the browser integration test checks controller ID retention.
 
 Android 15/x86_64 with host RTX 2070 SUPER/580.159.04: four instrumented tests passed, including strict device oracle status 0, tied/untied JNI decoding, cancellation/reset, invalid empty-oracle rejection and bundled UI/notes. With WebView WebGPU disabled, the real Qwen3 0.6B UI produced `OK.`, then after background/resume produced `OK.` for a follow-up, both matching original WebGPU. All 13,826,176 logits over the first 91 positions and all 17,168,768 logits over the follow-up’s 113 positions matched exactly through the Android executable. The initial host-GPU emulator used GTX for Vulkan and RTX for GLES and terminated during an activity-lifecycle test; selecting RTX for both allowed the instrumented and two-turn UI checks to complete. CI continues using SwiftShader; no physical phone performance claim follows from these emulators.
+
+## Signing setup
+
+The repository’s four Android signing Secrets were initialized for the first Android distribution after checking that no earlier Android release/signing configuration existed. The private PKCS12 key and recovery backup are stored outside the repository. Public signer certificate SHA-256: `bba2c46e51c46bd284693b39d28866ab046697570abdf37b7f02b6f7e8309b33`. Debug preflight with only the keystore path configured and release APK/AAB builds with the signing credentials were verified locally. Creating this identity did not publish a release tag; tag delivery uses the configured key through the existing workflow.
