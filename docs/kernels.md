@@ -225,7 +225,7 @@ Why 0.5 nats. The step-6 differences on `ctx2k_b`, `ctx4k` and `ctx8k` ("are" vs
 - llama.cpp's own CPU backend (f32 KV, no flash attention) moves `ctx2k_b`'s step-6 top-2 gap from the CUDA golden's 0.382 to 0.140, already a near tie by the old rule. Our engine moves it by 0.42, the same spread we show at 23 tokens.
 - Between llama.cpp backends the gap moves by |d| 0.25-0.6 on most steps, max 0.99.
 - Per-layer errors do not grow with position, and the rope is at least as accurate as CUDA's.
-- The CUDA llama-server (unsloth b10840, `-fa on`) is not reproducible past ~2K prompt tokens. Repeating the same request on `ctx4k` gives step-6 gaps of 0.04-0.48; one run takes another token at step 6 itself. `ctx8k`'s step-6 gap was 0.073 in the old golden and 0.23-0.52 on reruns. The ids of `ctx4k`, `ctx8k` and `ctx2k1` change from run to run at steps 6-54. The cases up to 1943 prompt tokens gave identical ids and logprobs in 3 of 3 runs.
+- The CUDA llama-server (unsloth b10840, `-fa on`) is not reproducible past ~2K prompt tokens. Repeating the same request on `ctx4k` gives step-6 gaps of 0.04-0.48; one run takes another token at step 6 itself. `ctx8k`'s step-6 gap was 0.073 in the old golden and 0.23-0.52 on reruns. The ids of `ctx4k`, `ctx8k` and `ctx2k1` change from run to run at steps 6-54. The cases up to 1943 prompt tokens gave identical ids and logprobs in 3 of 3 runs. (That server's QSA top-k was the cause: see "Golden build" below. Mainline's runs are identical through 8K.)
 
 So a 0.5-nat window on both sides covers backend noise.
 
@@ -241,9 +241,30 @@ What it still catches. Perturbing the engine in a scratch run (full model; `two-
 
 Greedy ids are a coarse oracle under either rule: the model absorbs a scaled layer, and its ids then move only at near ties. The x 2 run's `hash-map` step looks just like the unperturbed engine's `ctx2k_b` step (llama.cpp 0.34 vs ours 0.02), so no ids-only rule can excuse one and flag the other. Numeric errors are the per-layer check's job (`LAYERS=48 tests/test_q38flash.js`, relative L2 per tensor against llama.cpp's dumps); the goldens guard against gross breakage and wrong tokens at confident steps. Because of the non-reproducibility, `make_q38flash_llama.js` asks each case REPEAT (3) times. The first run is the golden; when another run's ids differ, the golden keeps that run's ids and top-5 ("runs"). The rule may take llama.cpp's top-5 from any run whose ids agree with the golden's up to the step. Without that, `ctx4k` would hinge on which run became the golden: 7276 is 0.505 below the top in the stored run, 0.447 and 0.054 in the two reruns. The maker reuses a case's stored prompt ids (the long prompts are cut from `roadmap/*.md`, which changes), so regenerating does not move a prompt.
 
+### Golden build (2026-10-15)
+
+Every Flash golden past the four short chat prompts now comes from mainline llama.cpp, not the unsloth b10840 build
+the first ones were made with. Each case in `tests/golden/q38flash_llama_greedy.json` records its build (`build`).
+- Build: mainline llama.cpp f2cc728, `llama-server` built from a clean `git archive` (Release, `GGML_CUDA=ON`,
+  `GGML_NATIVE=ON`), CUDA 13.0.88 with its bundled CCCL 3.0.1. ggml's CUDA top-k uses CUB's `DeviceTopK` only from CCCL
+  3.4.3 (a race before it, NVIDIA/cccl#10627); below that it takes ggml's own deterministic path. Server flags as
+  before: `-ngl 99 -fa on -c 131584 -np 1 -ot "per_layer_token_embd=CPU" --fit off`, f16 K / V; requests greedy,
+  `n_probs` 5, 3 runs a case.
+- Why: b10840's QSA graph (`build_qsa_top_k`) copies each block's score to its 4 cells and takes a 2051-cell top-k
+  with CUB's non-deterministic `DeviceTopK`, without making sure of the query's own tail block. Past ~2051 cells that
+  is neither the model's selection nor reproducible (llama.cpp issue #28497). Mainline's `build_qsa_sel` (the top 512
+  whole blocks plus the own tail, an exact top-k) is what `engine/` and `tests/reference/qsa_ref.mjs` follow.
+- Kept from b10840: `two-sum`, `hash-map`, `bash`, `eos-mid` (23-31 tokens, no selection). Mainline parts from two of
+  them, at near ties only (`hash-map` and `bash` at step 12), so they were left as they were.
+- Determinism: mainline's 3 runs are identical on every case through `ctx8k` (b10840's parted on `ctx4k`, `ctx8k`,
+  `ctx2k1`) and at 128K (`ctx128k`, `needle120k`). `ctx16k`, `ctx32k`, `needle30k` and `ctx64k` still part between
+  runs, at steps 5, 33-46, 35-40 and 25, so some other CUDA non-determinism is left at 16-64K.
+- Mainline also depends on how a step is batched: at `ctx128k` step 21 the server (ids decoded one at a time) has
+  4162 0.92 nats above 16350, a teacher-forced `llama_decode` in 2048-token batches only 0.22-0.31.
+
 ### Long context on the Flash path: goldens and the baseline
 
-`tests/golden/make_q38flash_llama.js` has three long cases, made with the same server (unsloth b10840 CUDA llama-server, `-fa on`, `per_layer_token_embd` on the CPU, now `-c 34816`; it fits on the GB10 with the whole model on the GPU), top-5 logprobs and 3 runs each. Their prompts are the roadmap notes followed by `docs/*.md` (roadmap alone is ~30K tokens), stored as ids:
+`tests/golden/make_q38flash_llama.js` has three long cases, made with the same server (then unsloth b10840, since 2026-10-15 mainline f2cc728 as above; CUDA llama-server, `-fa on`, `per_layer_token_embd` on the CPU, `-c 34816`, now `-c 131584`; it fits on the GB10 with the whole model on the GPU), top-5 logprobs and 3 runs each. Their prompts are the roadmap notes followed by `docs/*.md` (roadmap alone is ~30K tokens), stored as ids:
 - `ctx16k` (15,718 prompt tokens) and `ctx32k` (31,958): the same question as `ctx4k` / `ctx8k` (which note is about running models from disk).
 - `needle30k` (29,737): a sentence with a made-up passphrase (`amber-falcon-4127`) planted ~2.5K tokens in, asked for at the end. The case keeps `needle` (the passphrase) and `found` (llama.cpp's answer has it: yes, in all 3 runs).
 

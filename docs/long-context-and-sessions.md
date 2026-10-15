@@ -62,30 +62,73 @@ paste takes to read; a room opens at the longest proven length its devices hold 
 
 Goldens, two room nodes on one GB10 (40 / 40 GB, layers 0-23 + 24-47, f16 K / V, batched prefill, the f16 wire),
 `flash_gold.mjs pair CTX=131072` (`tests/golden/q38flash_llama_greedy.json`; past 8K a case passes against llama.cpp's
-golden or any of its reruns, and a needle case needs the passphrase):
+golden or any of its reruns, and a needle case needs the passphrase).
 
-| case | prompt | verdict | prefill (first answer) | decode |
-|---|---|---|---|---|
-| two-sum / bash / eos-mid | 23-31 | MATCH | 0.8-1.0 s | 15-18 tok/s |
-| hash-map | 23 | TIE at 49 | 0.6 s | 15.8 |
-| ctx2k / ctx2k_b / ctx2k1 | 1,887-2,082 | TIE at 26 / 6 / 13 | 10-11 s | 12.1-12.4 |
-| ctx4k | 3,867 | TIE at 6 | 18.9 s (204 tok/s) | 12.5 |
-| ctx8k | 7,663 | TIE at 6 | 37.5 s (204 tok/s) | 13.0 |
-| ctx16k | 15,718 | TIE at 3 | 78.5 s (200 tok/s) | 12.3 |
-| ctx32k | 31,958 | TIE at 0 (llama.cpp's rerun 1) | 160 s (200 tok/s) | 12.7 |
-| needle30k | 29,737 | MATCH (rerun 1), passphrase found | 150 s (198 tok/s) | 12.5 |
-| ctx64k | 64,795 | TIE at 13 (rerun 1) | 323 s (201 tok/s) | 12.6 |
-| needle120k | 119,198 | **passphrase found**; MISMATCH at step 0 (1.0 nat below llama.cpp's top) | 639 s (187 tok/s) | 12.1 |
-| ctx128k | 129,936 | MISMATCH at 21 (1.04 nats below llama.cpp's top; the same answer in substance) | 697 s (187 tok/s) | 12.1 |
+The reference changed on 2026-10-15. The goldens past ~2K tokens came from the unsloth b10840 CUDA llama-server, whose
+QSA graph (`build_qsa_top_k`: each block's score copied to its 4 cells, a top-k of 2051 cells, the query's own tail
+block not guaranteed, CUB's non-deterministic `DeviceTopK`) is not the model's selection past ~2051 cells and is not
+reproducible run to run (llama.cpp issue #28497). Mainline llama.cpp (`build_qsa_sel`: the top 512 whole blocks and the
+own tail block, an exact top-k), which our engine and `tests/reference/qsa_ref.mjs` follow, made them again: f2cc728,
+CUDA 13.0 with its CCCL 3.0.1, so ggml's own top-k (CUB's `DeviceTopK` needs CCCL >= 3.4.3), the same settings
+(`-c 131584 -fa on`, f16 K / V, `per_layer_token_embd` on the CPU, greedy, 3 runs each). Each case records its build
+(`build`); `two-sum`, `hash-map`, `bash` and `eos-mid` stay b10840's (short prompts, no selection). Mainline's 3 runs
+are identical on every case up to 8K and at 128K (`ctx128k`, `needle120k`); `ctx16k`, `ctx32k`, `needle30k` and
+`ctx64k` still part between runs, but later (steps 5-46; b10840's parted at 0-40), so some CUDA non-determinism is left
+there that is not the QSA top-k.
 
-- The same pair in f32 K / V gives the same verdicts at 16K-32K and the same two 128K differences, at the same steps:
-  they are not f16's. Not resolved yet (both engines keep rope angles in f32; the next check is a solo run, no wire).
+The pair, against the mainline goldens (2026-10-15), and against b10840's (2026-10-13, the same harness):
+
+| case | prompt | verdict vs mainline | vs b10840 | prefill (first answer) | decode |
+|---|---|---|---|---|---|
+| two-sum / bash / eos-mid | 23-31 | MATCH (golden unchanged) | MATCH | 0.6-0.7 s | 16-21 tok/s |
+| hash-map | 23 | TIE at 49 (golden unchanged) | TIE at 49 | 0.4 s | 20.2 |
+| ctx2k | 1,887 | TIE at 26 | TIE at 26 | 8.0 s | 15.6 |
+| ctx2k_b | 1,943 | TIE at 6 | TIE at 6 | 7.6 s | 15.4 |
+| ctx2k1 | 2,082 | TIE at 42 | TIE at 13 | 8.0 s | 15.5 |
+| ctx4k | 3,867 | TIE at 6 | TIE at 6 | 14.7 s (262 tok/s) | 15.0 |
+| ctx8k | 7,663 | TIE at 6 | TIE at 6 | 28.8 s (266 tok/s) | 15.0 |
+| ctx16k | 15,718 | TIE at 3 (top-5 of llama.cpp's rerun 1) | TIE at 3 | 61 s (257 tok/s) | 15.0 |
+| ctx32k | 31,958 | TIE at 0 (top-5 of rerun 1) | TIE at 0 (rerun 1) | 121 s (264 tok/s) | 15.0 |
+| needle30k | 29,737 | TIE at 35 (rerun 1), passphrase found | MATCH (rerun 1), found | 113 s (264 tok/s) | 14.5 |
+| ctx64k | 64,795 | TIE at 13 (top-5 of rerun 2) | TIE at 13 (rerun 1) | 259 s (250 tok/s) | 14.3 |
+| needle120k | 119,198 | **TIE at 0**, passphrase found (82601 is 0.26 below mainline's 760, our gap 0.15) | MISMATCH at 0 (1.0 nat), found | 476 s (250 tok/s) | 14.5 |
+| ctx128k | 129,936 | **MISMATCH at 21** (16350 is 0.92 below mainline's 4162, our gap 0.28; the same answer in substance) | MISMATCH at 21 (1.04) | 505 s (257 tok/s) | 14.1 |
+
+- The same pair in f32 K / V (46 / 46 GB): `needle120k` TIE at 0 (our gap 0.13), `ctx128k` MISMATCH at 21 (0.92 nats,
+  our gap 0.18): not f16's. So 131072 stays unproven. Step 21 of `ctx128k` moves with how mainline itself computes it:
+  teacher-forced (the prompt and the first ids through `llama_decode` in 2048-token batches) 4162 leads 16350 by only
+  0.22-0.31 nats, where the server, decoding the ids one at a time, has 0.92 (deterministic, 3 of 3). The room,
+  decoding, takes 16350 by 0.28. The rule judges the server's greedy run, so the case fails as it stands.
+- The room teacher-forced on the same ids (2026-10-15, the f16 pair; the room's ids equal the golden's through step 20,
+  so it is the same position). Log-probs at step 21, and 4162's lead over 16350:
+
+  | path | 4162 | 16350 | lead |
+  |---|---|---|---|
+  | llama.cpp server, one token at a time (the golden, 3 of 3) | -0.575 | -1.496 | +0.921 |
+  | llama.cpp `llama_decode`, prompt + 21 ids in 2048-token batches (2 runs) | -1.087 / -1.154 | -1.398 / -1.376 | +0.310 / +0.222 |
+  | room, prompt batched, 21 ids decoded one at a time (`flash_gold`) | -1.166 | -0.891 | -0.275 |
+  | room, prompt + 21 ids in one batched prefill | -1.166 | -0.891 | -0.275 |
+  | room, prompt batched, then the 20 ids as one 20-column pass | -1.166 | -0.891 | -0.275 |
+  | room, prompt + 20 ids batched, then one decode | -1.166 | -0.891 | -0.275 |
+
+  The room's paths agree to 1e-4 nats. llama.cpp's two disagree with each other by 0.51-0.58 on 4162 and 0.61-0.70 on
+  the lead. The room is 0.01-0.08 from llama.cpp's batched path on 4162 and 0.49-0.51 on 16350 (lead 0.50-0.58 off). It is
+  0.59 / 0.61 from the server's (lead 1.20 off), which is llama.cpp's own path gap plus that. Over the whole answer
+  (top-5 log-probs, the largest difference among the tokens both list): the room against llama.cpp's batched path on
+  the room's own 64 ids has a median of 0.47 (max 2.57), with the same top-1 at 62 of 64 steps (the other two are
+  near ties: step 21, and step 45 with a gap of 0.04 in both). llama.cpp's server against its own batched path, on the
+  golden's ids at steps 0-20, has a median of 0.92 (max 4.26). So the miss is path sensitivity at a near tie, of the
+  size llama.cpp shows against itself, not a defect in the room's decode or prefill attention at 128K. The rule is
+  unchanged, so `ctx128k` still fails and 131072 is not proven. Per-token prefill (`POOLED_FLASH_BATCH=0`, about 2.5
+  hours at 128K) was not run: batched, 20-column and decode passes already give the same numbers here.
+- `flash_gold.mjs` `UNPROVEN_CTX=1` (this harness only) lifts the cap to `CTX` so a room opens at a length before it is
+  proven.
 - 8K with batching off (`POOLED_FLASH_BATCH=0`, one column at a time): 15.8-18.3 tok/s, ctx8k in 485 s. Batched and
   per-token ids are identical on ctx4k and ctx8k; on ctx2k they part at step 29, after both left the golden at its near
   tie at 26.
 - 128K fits by memory: f16 K / V is 128 MiB per QSA layer at 131,072 (WebGPU's default binding), and the planner holds
   the demo room (a Mac tab lending 22 GB with the disk tier, a PC lending 12 GB) at 128K with the tab's disk-tier RAM at
-  4 GB (`room/flashdisk.js` `TAB_RAM_GB`, was 3). It is left out until a run passes the rule.
+  4 GB (`room/flashdisk.js` `TAB_RAM_GB`, was 3). It is left out until a run passes the rule (`ctx128k`, above).
 
 The demo room on real hardware (2026-10-14, `flash_tab_gold.mjs demo`): the Mac tab (Chrome, lends 20 GB, the disk
 tier with 4 GB of RAM, `maxStorageBufferBindingSize` 4 GiB) alone, then the PC joins over WiFi (`pooled join --gb 10

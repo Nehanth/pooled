@@ -12,7 +12,7 @@
 //        (WAIT_S, default 600) for a node from another process to join, e.g. one from an older build (a mixed room).
 // env: MODELS (default ~/llm/models: models/q38flash/<file>, source.js LOCAL, or <dir>/qwen3.8-flash/<file>),
 //      CTX=N (the room's context, asked; the cases with prompt + ids <= N; default: the cases under 2048, the room
-//        opening where it opens), POOLED_FLASH_KV=f32 (both nodes: an f32 K / V room instead of f16, env.js),
+//        opening where it opens; a CTX past the proven ones is held to the longest proven unless UNPROVEN_CTX=1), POOLED_FLASH_KV=f32 (both nodes: an f32 K / V room instead of f16, env.js),
 //      CASES=a,b (default every golden case under 2048 tokens), SOLO_GB (90), OUT (result JSON), PORT (8251),
 //      POOLED_QSA_ALWAYS=1 (QSA's gathered attention on every step, env.js qsaAlways). The result records the room's
 //      Flash format (ai-load.flash: QSA, or null for dense) and what each worker's ai-ready said it loaded.
@@ -33,6 +33,7 @@ import { spawn } from "node:child_process";
 import { createRoom, joinRoom } from "../index.js";
 import { greedy } from "../../../room/sampling.js";
 import { judgeGolden } from "../../../tests/q38flash_rule.js";
+import { CTX, FLASH_CTX_PROVEN } from "../../../room/models.js";
 
 const MODE = process.argv[2] || "solo";
 const MODEL = "qwen3.8-flash";
@@ -49,6 +50,13 @@ const pick = process.env.CASES ? process.env.CASES.split(",") : null;
 // a case passes against the golden or against any of llama.cpp's reruns, and a needle case also needs the passphrase
 // llama.cpp found (tests/test_q38flash_batch.js LONG=1's rule)
 const CTX_ASK = +process.env.CTX || 0, MAXCTX = CTX_ASK || 2048;
+// UNPROVEN_CTX=1 (this harness only; nothing on the site reads it): lifts Flash's context cap (room/models.js CTX, the
+// longest length in FLASH_CTX_PROVEN) to CTX in this process, so a room can open at a length before it is proven,
+// which is how a length gets proven. Both nodes of a pair run in this process, so both see it
+if (process.env.UNPROVEN_CTX === "1" && CTX_ASK > CTX[MODEL].max) {
+  CTX[MODEL].max = CTX_ASK;
+  log(`UNPROVEN_CTX: ${MODEL}'s context cap lifted to ${CTX_ASK} (proven: ${FLASH_CTX_PROVEN.join(", ")})`);
+}
 const cases = Object.entries(gold).filter(([k, v]) => !k.startsWith("_") && (!pick || pick.includes(k)) && v.prompt.length + v.ids.length <= MAXCTX);
 const out = { mode: MODE, model: MODEL, cases: {} };
 
