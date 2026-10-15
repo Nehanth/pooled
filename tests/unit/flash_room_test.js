@@ -9,7 +9,7 @@ import { SLICE_BYTES } from "../../room/transport.js";
 import { dealRoom, placeNgram, ngramHolder, shortNote } from "../../room/plan.js";
 import { offloadFor, ngramFor, ngramDisk, pledgeGB } from "../../room/pledge.js";
 import { createPipeline } from "../../room/pipeline.js";
-import { FlashRoomEngine, qwen4expCore, flashBatchCols } from "../../room/flash.js";
+import { FlashRoomEngine, qwen4expCore, flashBatchCols, DISK_STEP_COLS } from "../../room/flash.js";
 import { NgramState, makeConfig } from "../../engine/ngram.js";
 import { f16ToF32, f32ToF16 } from "../../engine/gguf.js";
 
@@ -541,6 +541,28 @@ Deno.test("flash batch: a solo room's prompt (prefillTokens) runs in passes, the
   const mk = (s) => createPipeline({ state: s, options: { profile: "browser" }, transport: { sendTo() {}, sendHidden() { throw new Error("solo"); } } });
   eq(await greedy(mk(ai), ai, longPrompt, 6), await greedy(mk(ref), ref, longPrompt, 6));
   eq(b.passes.map(([p, n]) => [p, n]), [[0, 100], [100, 100], [200, 99]], "the prompt less its last token, 100 columns a pass, from position 0");
+});
+
+Deno.test("flash batch: a device with disk-tier layers steps a short prompt one column at a time (no whole-layer reads), a long one in passes", async () => {
+  const L = 8, mk = () => fakeCore(fakeDevice(), { lo: 0, hi: L, L, hasEmbed: true, hasHead: true, maxSeq: 1024 });
+  const ids = (n) => Array.from({ length: n }, (_, i) => 7 + (i * 13) % 50);
+  for (const [n, passes] of [[DISK_STEP_COLS, 0], [DISK_STEP_COLS + 1, 2]]) {
+    const core = mk(), b = fakeBatch(core, 100);
+    core.experts = { diskSet: new Set([3]) };
+    const E = new FlashRoomEngine(core, { batch: b });
+    const want = mk();
+    for (const t of ids(n)) await want.step(t, null);
+    const h = await E.prefillHidden(ids(n), 0);
+    eq([b.passes.length, core.pos, h.length], [passes, n, n * T_HD], `${n} tokens`);
+    // the same residuals as core steps (the fake batch steps too: same numbers either way)
+    const ref = mk(), R = new Float32Array(n * T_HD);
+    for (let c = 0; c < n; c++) R.set(await ref.step(ids(n)[c], null), c * T_HD);
+    eq(Array.from(h.subarray(0, 8)), Array.from(R.subarray(0, 8)));
+  }
+  // no disk layers: passes as before
+  const core = mk(), b = fakeBatch(core, 100);
+  await new FlashRoomEngine(core, { batch: b }).prefillHidden(ids(40), 0);
+  eq(b.passes.length, 1);
 });
 
 Deno.test("flash batch: a chain with a device that can't batch gets 16-column frames, 2 in flight, and the same ids", async () => {
