@@ -456,8 +456,9 @@ export const MAX_SEQ_LONG = 8192;
 // (packages/room-node/test/flash_gold.mjs pair, f16 K / V, batched, 2026-10-13; docs/long-context-and-sessions.md has the
 // runs). A length that is not proven is not offered and not opened. FLASH_CTX_OPTIONS: the picker's choices (a short
 // list), the proven ones only. 131072 is not proven yet: memory and the 128 MiB binding hold it in f16, and a
-// passphrase ~111K tokens back is found, but ctx128k and needle120k each differ from llama.cpp at one step by ~1.0 nat,
-// past the golden rule's 0.5, in f16 and in f32 alike; add it here once a run passes.
+// passphrase ~111K tokens back is found (needle120k passes against mainline llama.cpp's goldens, 2026-10-15), but
+// ctx128k still differs from mainline at step 21 by 0.92 nats, past the golden rule's 0.5, in f16 and in f32 alike
+// (docs/long-context-and-sessions.md); add it here once a run passes. flash_gold.mjs UNPROVEN_CTX=1 opens a test room there.
 export const FLASH_CTX_PROVEN = [2048, 8192, 16384, 32768, 65536];
 export const FLASH_CTX_OPTIONS = [8192, 32768, 65536, 131072].filter((c) => FLASH_CTX_PROVEN.includes(c));
 function FLASH_CTX_ENTRY() {

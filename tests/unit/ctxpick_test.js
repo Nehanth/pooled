@@ -114,7 +114,7 @@ Deno.test("ctxpick: prefill estimates in words", () => {
 });
 
 Deno.test("ctxpick: the demo room (Mac tab 22 + PC 12) holds 128K by the memory model, for when 128K is proven", () => {
-  // FLASH_CTX_PROVEN stops at 64K (models.js: the 128K goldens differ from llama.cpp at one step); this keeps the memory
+  // FLASH_CTX_PROVEN stops at 64K (models.js: ctx128k differs from mainline llama.cpp at step 21); this keeps the memory
   // side ready: f16 K / V, the tab's 4 GB disk-tier RAM, the 2-slot checkpoint reserve
   const metas = ROOMS["Mac tab 22 + PC 12 (the demo)"], pledges = pledgesOf(metas);
   const f = fitAtCtx(F, { c: 131072, kv: "f16", pledges, metas, costs: roomCosts(F), margin: hostMarginFor(F, metas[0]) });

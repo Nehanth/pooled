@@ -1,9 +1,14 @@
 // Goldens for Qwen3.8-Flash-Next (roadmap/33-qwen38-flash.md, section 5): greedy continuations from a running llama-server that
-// knows the qwen4exp arch (the unsloth b10840 build on the GB10; mainline needs >= 6c84c7d), same bartowski
+// knows the qwen4exp arch (mainline >= 6c84c7d; the unsloth b10840 build made the first ones), same bartowski
 // Q4_0 GGUF, prompts sent as token ids from the engine's own tokenizer so both sides see the same prompt.
-//   llama-server -m models/q38flash/Qwen3.8-Flash-Next-Q4_0-00001-of-00003.gguf -ngl 99 -fa on -c 34816 -np 1 \
-//     -ot "per_layer_token_embd=CPU" --port 8297
-//   deno run --allow-read --allow-net --allow-write --allow-env tests/golden/make_q38flash_llama.js [http://127.0.0.1:8297] [n=64] [cases]
+//   llama-server -m models/q38flash/Qwen3.8-Flash-Next-Q4_0-00001-of-00003.gguf -ngl 99 -fa on -c 131584 -np 1 \
+//     -ot "per_layer_token_embd=CPU" --fit off --port 8297
+//   BUILD="<llama.cpp build>" deno run --allow-read --allow-net --allow-write --allow-env tests/golden/make_q38flash_llama.js [http://127.0.0.1:8297] [n=64] [cases]
+// Each case records the llama.cpp build that made it ("build", from BUILD; the cases made before the field: unsloth
+// b10840). Since 2026-10-15 every case is from mainline llama.cpp (f2cc728, CUDA 13.0 / its CCCL 3.0): b10840's QSA graph
+// (build_qsa_top_k, a 2051-cell top-k over per-cell copies of the block scores, CUB's non-deterministic top-k) is not
+// the model's selection past ~2051 cells (llama.cpp issue #28497); mainline's build_qsa_sel (the top 512 whole blocks
+// and the own tail block, an exact top-k) is what engine/ and tests/reference/qsa_ref.mjs follow (docs/kernels.md).
 // Cases: test_moe's three chat prompts; "eos-mid", an <|endoftext|> in the middle of the prompt (the n-gram
 // hash resets there); "ctx2k", just under the dense path's 2048 cap (prompt + ids); "ctx4k" / "ctx8k", past
 // QSA's 2051-cell budget, for the sparse-attention phase; and "ctx2k_b" (prompt and continuation stay under 2051
@@ -111,6 +116,9 @@ const nearTies = (gap) => {
   return { nearTie: ties.length ? ties[0][0] : -1, nearTies: ties };
 };
 const TOPK = 5, REPEAT = +(Deno.env.get("REPEAT") || 3);
+const B10840 = "unsloth llama.cpp b10840-mix-d5c17a0 CUDA";
+const BUILD = Deno.env.get("BUILD") || (() => { throw new Error("BUILD=<the llama-server's build> (recorded per case)"); })();
+for (const v of Object.values(old)) if (v && typeof v === "object" && !Array.isArray(v) && !v.build) v.build = B10840;
 const out = ONLY ? Object.fromEntries(Object.entries(old).filter(([k]) => !k.startsWith("_"))) : {};
 for (const name of picked) {
   const keep = Deno.env.get("FRESH") !== "1" && old[name]?.prompt;
@@ -128,7 +136,7 @@ for (const name of picked) {
     if (foundRuns) foundRuns.push(jr.content.includes(c.needle));
     if (jr.tokens.some((x, i) => x !== j.tokens[i]) || jr.tokens.length !== j.tokens.length) runs.push({ ids: jr.tokens, top: topOf(jr) });
   }
-  out[name] = { q, ...(c.needle ? { needle: c.needle, found: j.content.includes(c.needle), foundRuns } : {}), text: j.content, ids: j.tokens, ...nearTies(gap), gap, top, reproducible: runs.length ? false : REPEAT, ...(runs.length ? { runs } : {}), prompt };
+  out[name] = { q, build: BUILD, ...(c.needle ? { needle: c.needle, found: j.content.includes(c.needle), foundRuns } : {}), text: j.content, ids: j.tokens, ...nearTies(gap), gap, top, reproducible: runs.length ? false : REPEAT, ...(runs.length ? { runs } : {}), prompt };
   console.log(name, `${prompt.length} prompt tokens, near tie at ${out[name].nearTie}, ${runs.length ? `${runs.length} of ${REPEAT - 1} reruns differ (first at ${runs.map((r) => r.ids.findIndex((x, i) => x !== j.tokens[i])).join(",")})` : `reproducible x${REPEAT}`}:`, JSON.stringify(j.content));
 }
-Deno.writeTextFileSync(p, "{\n" + Object.entries({ _source: `unsloth llama.cpp b10840-mix-d5c17a0 CUDA llama-server on the GB10, greedy, bartowski Qwen3.8-Flash-Next-Q4_0 (3-file split), -fa on, per_layer_token_embd on the CPU, n_probs ${TOPK}`, ...out }).map(([k, v]) => ` ${JSON.stringify(k)}: ${JSON.stringify(v)}`).join(",\n") + "\n}\n");
+Deno.writeTextFileSync(p, "{\n" + Object.entries({ _source: `llama.cpp CUDA llama-server on the GB10 (each case's "build"), greedy, bartowski Qwen3.8-Flash-Next-Q4_0 (3-file split), -fa on, per_layer_token_embd on the CPU, n_probs ${TOPK}`, ...out }).map(([k, v]) => ` ${JSON.stringify(k)}: ${JSON.stringify(v)}`).join(",\n") + "\n}\n");
