@@ -23,3 +23,16 @@ tests/eval/results/
 dist/
 docs-site/dist/
 docs-site/.astro/
+
+# Android/native generated files and signing material
+android/.gradle/
+android/.cxx/
+android/build/
+android/app/build/
+android/app/.cxx/
+android/local.properties
+native/vulkan/build/
+*.jks
+*.keystore
+*.apk
+*.aab

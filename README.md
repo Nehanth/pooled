@@ -31,6 +31,10 @@ Duga is an account-free browser assistant built on the Pooled runtime. The root 
 
 Private Net ownership enforcement, Global Net, credits, service connectors and microphone conversation remain proposed. See [the Duga design note](docs/design/duga.md) for implementation boundaries, privacy and validation. The upstream Pooled CLI/package names and wire/storage identifiers are preserved for compatibility.
 
+## Android Vulkan preview
+
+The [Android port](android/README.md) bundles the Duga UI and a native Vulkan Dense backend; Local does not require WebView WebGPU. APK/AAB builds and tag-based GitHub Releases are configured in [Android Actions](.github/workflows/android.yml). Native inference is experimental, uses a strict oracle gate, and currently supports Qwen3 0.6B Q8 only. Production signing requires repository Secrets.
+
 ## How it works
 
 Friends open one link. Each device (laptop, desktop, phone) holds some of the model's layers and runs them on its own GPU with our own WGSL kernels. For every token, a small hidden state (10 KB on the 27B, 4 KB on the MoE) passes from tab to tab over direct WebRTC connections, and the host turns the result into the next word.

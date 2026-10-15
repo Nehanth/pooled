@@ -28,3 +28,7 @@ docs-site/.astro
 /dist
 
 
+
+# Native Android builds are separate from the website.
+android
+native

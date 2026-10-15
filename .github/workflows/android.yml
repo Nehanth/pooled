@@ -1,0 +1,142 @@
+name: Android APK and AAB
+on:
+  pull_request:
+    paths: ['android/**', 'native/**', 'app/**', 'engine/**', 'room/**', 'room.js', 'p2p.html', 'index.html', 'site/**', 'scripts/android-*', '.github/workflows/android.yml']
+  push:
+    branches: [main, feat/duga-android]
+    tags: ['android-v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: android-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  oracle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+      DUGA_WEBGPU_MODULE: native/vulkan/oracle/node_modules/webgpu/index.js
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with: { node-version: 22 }
+      - name: Install native build and software Vulkan driver
+        run: sudo apt-get update && sudo apt-get install -y g++ libvulkan-dev mesa-vulkan-drivers
+      - name: Install pinned shader compiler and WebGPU oracle
+        run: |
+          rustup update stable --no-self-update
+          cargo +stable install naga-cli --version 30.0.1 --locked
+          npm ci --prefix native/vulkan/oracle --no-audit --no-fund
+      - name: Compile original shader sources and Vulkan runners
+        run: |
+          node native/vulkan/shaders.mjs
+          g++ -std=c++17 -O2 -ffp-contract=off -Inative/vulkan/build/shaders native/vulkan/vulkan.cpp native/vulkan/oracle.cpp -lvulkan -o native/vulkan/build/duga-vk-oracle
+          g++ -std=c++17 -O2 -ffp-contract=off -Inative/vulkan/build/shaders native/vulkan/vulkan.cpp native/vulkan/gguf.cpp native/vulkan/dense.cpp native/vulkan/model-run.cpp -lvulkan -o native/vulkan/build/duga-vk-model
+      - name: Capture WebGPU oracle and require exact Vulkan parity
+        env:
+          DUGA_SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          node native/vulkan/capture-oracle.mjs
+          native/vulkan/build/duga-vk-oracle native/vulkan/build/oracle.dvk
+          node native/vulkan/check-model.mjs
+          node --test tests/duga/*.test.mjs
+      - name: Upload validated native shader inputs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-vulkan-inputs
+          path: |
+            native/vulkan/build/shaders/
+            native/vulkan/build/oracle.dvk
+            native/vulkan/build/oracle.dvk.json
+          if-no-files-found: error
+          retention-days: 14
+
+  build:
+    needs: oracle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with: { node-version: 22 }
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with: { distribution: temurin, java-version: 17 }
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407
+      - uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with: { name: native-vulkan-inputs, path: native/vulkan/build }
+      - name: Install pinned Android SDK components
+        run: sdkmanager 'platforms;android-36' 'build-tools;35.0.0' 'ndk;27.3.13750724' 'cmake;3.22.1'
+      - name: Validate version for tag delivery
+        if: startsWith(github.ref, 'refs/tags/android-v')
+        env: { RELEASE_TAG: '${{ github.ref_name }}' }
+        run: node scripts/android-version.mjs
+      - name: Configure release signing
+        if: startsWith(github.ref, 'refs/tags/android-v')
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          test -n "$KEYSTORE_BASE64" && test -n "$KEYSTORE_PASSWORD" && test -n "$KEY_ALIAS" && test -n "$KEY_PASSWORD" || { echo 'Android release signing secrets are required; refusing unsigned tag delivery.'; exit 1; }
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/duga-release.jks"
+          chmod 600 "$RUNNER_TEMP/duga-release.jks"
+          printf 'DUGA_KEYSTORE_PATH=%s\n' "$RUNNER_TEMP/duga-release.jks" >> "$GITHUB_ENV"
+      - name: Test and lint Android port
+        run: android/gradlew -p android testDebugUnitTest lintDebug --no-daemon
+      - name: Build preview APK and AAB
+        if: ${{ !startsWith(github.ref, 'refs/tags/android-v') }}
+        run: android/gradlew -p android assembleDebug bundleDebug --no-daemon
+      - name: Build signed release APK and AAB
+        env:
+          DUGA_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          DUGA_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          DUGA_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        if: startsWith(github.ref, 'refs/tags/android-v')
+        run: |
+          android/gradlew -p android assembleRelease bundleRelease --no-daemon
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify android/app/build/outputs/apk/release/app-release.apk
+          jarsigner -verify android/app/build/outputs/bundle/release/app-release.aab > "$RUNNER_TEMP/aab-signature.txt"
+          grep -q "jar verified" "$RUNNER_TEMP/aab-signature.txt"
+      - name: Verify 16 KB native-library ZIP alignment
+        run: |
+          find android/app/build/outputs/apk -name "*.apk" -exec "$ANDROID_HOME/build-tools/35.0.0/zipalign" -c -P 16 4 {} \;
+      - name: Package delivery files and checksums
+        run: |
+          mkdir -p android-delivery
+          if [[ "$GITHUB_REF" == refs/tags/android-v* ]]; then
+            cp android/app/build/outputs/apk/release/app-release.apk "android-delivery/duga-android-$DUGA_VERSION_NAME.apk"
+            cp android/app/build/outputs/bundle/release/app-release.aab "android-delivery/duga-android-$DUGA_VERSION_NAME.aab"
+          else
+            cp android/app/build/outputs/apk/debug/app-debug.apk android-delivery/duga-android-debug.apk
+            cp android/app/build/outputs/bundle/debug/app-debug.aab android-delivery/duga-android-debug.aab
+          fi
+          cd android-delivery
+          sha256sum *.apk *.aab > SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with: { name: duga-android, path: android-delivery/, if-no-files-found: error, retention-days: 30 }
+      - name: Remove temporary signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/duga-release.jks"
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/android-v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions: { contents: write }
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with: { name: duga-android, path: android-delivery }
+      - name: Publish APK and AAB on the existing tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          flags=()
+          [[ "$RELEASE_TAG" == *-*.*.*-* ]] && flags+=(--prerelease)
+          gh release create "$RELEASE_TAG" android-delivery/* --verify-tag --title "Duga Android ${RELEASE_TAG#android-v}" --generate-notes "${flags[@]}"

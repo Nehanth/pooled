@@ -15,7 +15,7 @@ const docs = path.join(root, 'docs-site', 'dist');
 
 // Never part of the site: build output, the docs project itself, the contributor notes in docs/
 // (the URL /docs is the built docs), git and tool state.
-const ALWAYS_SKIP = new Set(['dist', 'docs-site', 'docs', '.git', '.vercel', 'node_modules', '.astro']);
+const ALWAYS_SKIP = new Set(['dist', 'docs-site', 'docs', '.git', '.vercel', 'node_modules', '.astro', 'android', 'native']);
 
 // Top-level patterns from .vercelignore (plain names and simple `*` globs; negations are ignored,
 // they only re-include files the docs build reads, like CHANGELOG.md).

@@ -31,3 +31,9 @@ test('unavailable cache is optional; corrupt cache is refetched; cancellation st
   ctrl.abort(); await assert.rejects(read(url,0,3)); assert.equal(requests,1);
   await assert.rejects(localRangeFetcher()(url,-1,2));
 });
+test('Android Local selects the native bridge before touching WebGPU', async () => {
+  const {loadLocal}=await import('../../app/local.js');const calls=[];
+  globalThis.DugaNativeRuntime={call:async type=>{calls.push(type);throw Error('native oracle gate refused this device');}};
+  try {await assert.rejects(loadLocal(),/native oracle gate/);assert.equal(calls[0],'load');}
+  finally {delete globalThis.DugaNativeRuntime;}
+});

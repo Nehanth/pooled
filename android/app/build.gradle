@@ -1,0 +1,74 @@
+plugins {
+  id 'com.android.application'
+}
+
+android {
+  namespace 'app.duga.android'
+  compileSdk 36
+
+  defaultConfig {
+    applicationId 'app.duga.android'
+    minSdk 29
+    targetSdk 36
+    versionCode Integer.parseInt(System.getenv('DUGA_VERSION_CODE') ?: '1')
+    versionName System.getenv('DUGA_VERSION_NAME') ?: '0.1.0-preview'
+    testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+    ndk { abiFilters 'arm64-v8a', 'x86_64' }
+    externalNativeBuild { cmake { cppFlags '-std=c++17 -ffp-contract=off'; arguments '-DANDROID_STL=c++_static', '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON' } }
+  }
+  signingConfigs {
+    release {
+      def keyPath = System.getenv('DUGA_KEYSTORE_PATH')
+      if (keyPath) {
+        storeFile file(keyPath)
+        storePassword System.getenv('DUGA_KEYSTORE_PASSWORD')
+        keyAlias System.getenv('DUGA_KEY_ALIAS')
+        keyPassword System.getenv('DUGA_KEY_PASSWORD')
+      }
+    }
+  }
+  buildTypes {
+    release {
+      minifyEnabled false
+      if (System.getenv('DUGA_KEYSTORE_PATH')) signingConfig signingConfigs.release
+    }
+  }
+  ndkVersion '27.3.13750724'
+  externalNativeBuild { cmake { path file('../../native/vulkan/CMakeLists.txt'); version '3.22.1' } }
+  compileOptions {
+    sourceCompatibility JavaVersion.VERSION_17
+    targetCompatibility JavaVersion.VERSION_17
+  }
+  buildFeatures { buildConfig true }
+  sourceSets.main.assets.srcDirs = [layout.buildDirectory.dir('generated/web-assets')]
+  testOptions.unitTests.returnDefaultValues = true
+  lint {
+    abortOnError true
+    checkReleaseBuilds true
+  }
+}
+
+def repoRoot = rootProject.projectDir.parentFile
+
+tasks.register('syncWebAssets', Exec) {
+  workingDir repoRoot
+  commandLine 'node', 'scripts/android-assets.mjs', '--out', layout.buildDirectory.dir('generated/web-assets').get().asFile.absolutePath
+  inputs.file new File(repoRoot, 'native/vulkan/build/oracle.dvk')
+  inputs.files(fileTree(repoRoot) {
+    include 'index.html', 'p2p.html', 'room.js', 'favicon.svg', 'site.webmanifest', 'LICENSE'
+    include 'app/**', 'engine/**', 'room/**', 'harness/**', 'site/**', 'android/web/**'
+    include 'scripts/android-assets.mjs'
+  })
+  outputs.dir layout.buildDirectory.dir('generated/web-assets')
+}
+tasks.named('preBuild').configure { dependsOn 'syncWebAssets' }
+tasks.configureEach { if (name.startsWith('configureCMake') || name.startsWith('buildCMake')) dependsOn 'syncWebAssets' }
+
+dependencies {
+  implementation 'androidx.webkit:webkit:1.14.0'
+  testImplementation 'junit:junit:4.13.2'
+  testImplementation 'org.json:json:20240303'
+  androidTestImplementation 'androidx.test:runner:1.6.2'
+  androidTestImplementation 'androidx.test:rules:1.6.1'
+  androidTestImplementation 'androidx.test.ext:junit:1.2.1'
+}

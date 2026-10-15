@@ -6,6 +6,7 @@ import { engineModel } from '../harness/engine-model.js';
 import { CACHE_NAME, cacheKey } from '../room/weightcache.js';
 export const LOCAL_MODEL = 'qwen3-0.6b';
 export async function loadLocal({ signal, onStatus = () => {}, onProgress = () => {} } = {}) {
+  if (globalThis.DugaNativeRuntime) return (await import('./android-local.js')).loadAndroidLocal({ signal,onStatus,onProgress });
   if (!navigator.gpu) throw new Error('Local inference needs WebGPU. Use Chrome or Edge on a supported desktop, or Safari 26. You can also join a trusted room.');
   const adapter = await navigator.gpu.requestAdapter();
   if (!adapter) throw new Error('This browser could not access a WebGPU device. Try another supported browser or join a trusted room.');

@@ -1,0 +1,6 @@
+{
+  "name": "duga-vulkan-oracle-tools",
+  "private": true,
+  "type": "module",
+  "dependencies": { "webgpu": "0.6.2" }
+}

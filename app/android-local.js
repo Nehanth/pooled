@@ -1,0 +1,37 @@
+// Android-only adapter: JS handles the unchanged tokenizer/template; JNI dispatches native Vulkan.
+// The bridge is injected into bundled Android pages only. There is no WebGPU or remote inference fallback.
+import { buildIds, specials } from '../room/conversation.js';
+import { makeTokenizer } from '../engine/tokenizer.js';
+import { OwnIds } from '../harness/model-common.js';
+export async function loadAndroidLocal({ signal,onStatus=()=>{},onProgress=()=>{} }={}) {
+  const call=globalThis.DugaNativeRuntime.call;
+  const stop=()=>{call('cancel').catch(()=>{});};
+  signal?.addEventListener('abort',stop,{once:true});
+  let info;
+  try { info=await call('load',{},p=>{onStatus(p.status||'Preparing native Vulkan…');if(p.total)onProgress(p.done,p.total);});signal?.throwIfAborted(); }
+  catch(e){stop();throw e;}
+  finally { signal?.removeEventListener('abort',stop); }
+  const response=await fetch('/models/tokenizer.json');if(!response.ok)throw Error('Native tokenizer unavailable.');
+  const tok=makeTokenizer(await response.json()),own=new OwnIds(),S=specials(tok),stops=new Set([S.imEnd,S.eot].filter(Number.isInteger));
+  let disposed=false;
+  return {
+    dispose(){if(disposed)return;disposed=true;stop();call('close').catch(()=>{});},
+    async *generate({system='',turns,signal}){
+      if(disposed)throw Error('Native model has been released.');
+      own.prune(turns.filter(t=>t.role==='assistant').map(t=>t.text));
+      const rendered=turns.map(t=>t.role==='assistant'&&own.get(t.text)?{role:t.role,ids:own.get(t.text)}:t);
+      const ids=buildIds(tok,{system,turns:rendered,thinking:false});
+      if(ids.length+2>info.context)throw Error(`This native preview has a ${info.context}-token context. Shorten the question or start a new conversation.`);
+      signal?.throwIfAborted();signal?.addEventListener('abort',stop,{once:true});let text='';const output=[];
+      try {
+        let result=await call('evaluate',{ids,reset:true});
+        const max=Math.min(384,info.context-ids.length-2);
+        for(let i=0;i<max&&!signal?.aborted&&!stops.has(result.token);i++){
+          output.push(result.token);const now=tok.decode(output);if(now.length>text.length&&!now.endsWith('\uFFFD')){yield now.slice(text.length);text=now;}
+          if(i+1<max)result=await call('evaluate',{ids:[result.token],reset:false});
+        }
+        own.set(tok.decode(output),output.slice());
+      } finally {signal?.removeEventListener('abort',stop);}
+    },
+  };
+}

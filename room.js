@@ -2548,18 +2548,20 @@ $("add-virtual").addEventListener("click", addVirtual);
 // elsewhere (a local static server, the emulator), the link keeps this page's path and query
 // (signal=, wire=) and adds ?code=.
 function roomLink() {
+  // APK assets have a reserved local origin; shared invitations must use the public site.
+  const inviteOrigin = location.hostname === "appassets.androidplatform.net" ? "https://duga.app" : location.origin;
   // a room on anything but the page's usual first server: the link names it, so joiners look there
   if (location.pathname === "/room" || location.pathname.startsWith("/r/")) {
     // (dev=0: a signal= link would otherwise open the page in dev mode, see p2p.html)
     const sig = signalServer && signalServer.spec !== SIGNAL_FIRST ? "?signal=" + encodeURIComponent(signalServer.spec) + (DEV ? "" : "&dev=0") : "";
-    return `${location.origin}/r/${roomCode}${sig}${inviteKey()}`;
+    return `${inviteOrigin}/r/${roomCode}${sig}${inviteKey()}`;
   }
   const q = shareQuery(location.search); q.set("code", roomCode); q.delete("ask");   // never a relay password in a link
   if (signalServer && (q.has("signal") || signalServer.spec !== SIGNAL_FIRST)) {
     if (!q.has("signal") && !DEV) q.set("dev", "0");
     q.set("signal", signalServer.spec);
   }
-  return `${location.origin}${location.pathname}?${q}${inviteKey()}`;
+  return `${inviteOrigin}${location.pathname}?${q}${inviteKey()}`;
 }
 // the host's links carry the invite key (a device that opens one is let in without asking); a guest's
 // don't: it doesn't know the key, and the host is asked about whoever it invites

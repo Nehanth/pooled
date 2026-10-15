@@ -132,3 +132,11 @@ disconnect.addEventListener('click', () => confirm('Disconnect this room workspa
   $('workspace').removeAttribute('src'); $('workspace').hidden = true; $('workspace-open').hidden = false; disconnect.hidden = true; event('Room workspace disconnected. Credentials were not revoked.');
 }));
 addEventListener('pagehide', () => { run?.abort(); model?.dispose(); });
+
+// Native host lifecycle: release computation while keeping explicitly saved notes.
+addEventListener('duga:pause', () => {
+  run?.abort(); model?.dispose(); model = null;
+  const f = $('workspace'); f.removeAttribute('src'); f.hidden = true;
+  $('workspace-open').hidden = false; disconnect.hidden = true;
+  event('Android paused the workspace. Active computation and room connections stopped.');
+});

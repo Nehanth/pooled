@@ -1,0 +1,7 @@
+<resources>
+  <string name="app_name">Duga</string>
+  <string name="loading">Opening Duga…</string>
+  <string name="background_notice">Duga paused. Active tasks and room connections were stopped; reopen the room to reconnect.</string>
+  <string name="export_prompt">Save exported file</string>
+  <string name="share_prompt">Share from Duga</string>
+</resources>
