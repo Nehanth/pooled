@@ -3,6 +3,8 @@ import androidx.test.core.app.ActivityScenario;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
 import android.webkit.WebView;
+import android.content.pm.ActivityInfo;
+import android.content.res.Configuration;
 import android.os.SystemClock;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
@@ -49,6 +51,25 @@ public class PortSmokeTest {
     }
     return null;
   }
+  private View awaitConfirmation(ActivityScenario<MainActivity> scenario)throws Exception {
+    long end=System.currentTimeMillis()+10000;AtomicReference<View> button=new AtomicReference<>();
+    while(System.currentTimeMillis()<end){scenario.onActivity(a->button.set(confirmationButton()));if(button.get()!=null)return button.get();Thread.sleep(100);}
+    fail("Native confirmation did not appear");return null;
+  }
+  private void cancelAndroidDialog(ActivityScenario<MainActivity> scenario)throws Exception {
+    long end=System.currentTimeMillis()+10000;
+    while(scenario.getState()==androidx.lifecycle.Lifecycle.State.RESUMED && System.currentTimeMillis()<end)Thread.sleep(100);
+    assertNotEquals("Android dialog did not open",androidx.lifecycle.Lifecycle.State.RESUMED,scenario.getState());
+    // A chooser may still be animating in, or the document picker may consume
+    // the first Back to hide its keyboard. Wait for the actual Activity return.
+    for(int attempt=0;attempt<4 && scenario.getState()!=androidx.lifecycle.Lifecycle.State.RESUMED;attempt++){
+      Thread.sleep(500);
+      InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(KeyEvent.KEYCODE_BACK);
+      end=System.currentTimeMillis()+2000;
+      while(scenario.getState()!=androidx.lifecycle.Lifecycle.State.RESUMED && System.currentTimeMillis()<end)Thread.sleep(100);
+    }
+    assertEquals("Android dialog did not return",androidx.lifecycle.Lifecycle.State.RESUMED,scenario.getState());
+  }
   @Test public void cancellingNativeConfirmationSettlesLoadAndAllowsRetry()throws Exception {
     try(ActivityScenario<MainActivity> scenario=ActivityScenario.launch(MainActivity.class)){
       ready(scenario);
@@ -74,6 +95,66 @@ public class PortSmokeTest {
       tapWeb(scenario,".workspace-intro a[target=_blank]");
       awaitJs(scenario,"location.pathname === '/room' && !!document.querySelector('#join-gpu') && !document.querySelector('#join-gpu').hidden");
       assertEquals("true",js(scenario,"!!window.DugaNativeRuntime && !navigator.gpu"));
+      js(scenario,"window.roomSession='still open';");
+      InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(KeyEvent.KEYCODE_BACK);
+      View stay=awaitConfirmation(scenario);
+      scenario.onActivity(a->stay.performClick());
+      assertEquals("true",js(scenario,"location.pathname === '/room' && window.roomSession === 'still open'"));
+      InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(KeyEvent.KEYCODE_BACK);
+      View leave=awaitConfirmation(scenario);
+      scenario.onActivity(a->leave.getRootView().findViewById(android.R.id.button1).performClick());
+      ready(scenario);
+      assertEquals("true",js(scenario,"location.pathname === '/'"));
+    }
+  }
+  @Test public void rotationRetainsLiveAssistantAndDraft()throws Exception {
+    try(ActivityScenario<MainActivity> scenario=ActivityScenario.launch(MainActivity.class)){
+      ready(scenario);
+      AtomicReference<MainActivity> original=new AtomicReference<>();
+      scenario.onActivity(original::set);
+      js(scenario,"window.sessionTokens=[42,17,99];document.querySelector('#prompt').value='Unsent draft';");
+      for(int orientation:new int[]{ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE,ActivityInfo.SCREEN_ORIENTATION_PORTRAIT}){
+        scenario.onActivity(a->a.setRequestedOrientation(orientation));
+        int expected=orientation==ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE?Configuration.ORIENTATION_LANDSCAPE:Configuration.ORIENTATION_PORTRAIT;
+        long end=System.currentTimeMillis()+10000;AtomicReference<Integer> actual=new AtomicReference<>();
+        do{scenario.onActivity(a->{assertSame("Rotation must retain the Activity and its live WebView",original.get(),a);actual.set(a.getResources().getConfiguration().orientation);});if(actual.get()==expected)break;Thread.sleep(100);}while(System.currentTimeMillis()<end);
+        assertEquals(expected,(int)actual.get());
+        assertEquals("true",js(scenario,"JSON.stringify(window.sessionTokens)==='[42,17,99]' && document.querySelector('#prompt').value==='Unsent draft'"));
+      }
+    }
+  }
+  @Test public void bridgeValidationFailuresRejectImmediatelyAndAllowRetry()throws Exception {
+    try(ActivityScenario<MainActivity> scenario=ActivityScenario.launch(MainActivity.class)){
+      ready(scenario);
+      for(String request:new String[]{"'copy',{text:42}","'export',{filename:'bad/name',mime:'text/plain',base64:'eA=='}","'export',{filename:'ok.txt',mime:'invalid/type',base64:'eA=='}","'export',{filename:'ok.txt',mime:'text/plain',base64:'!bad'}","'share',{text:'',url:'file:///private'}","'evaluate',{ids:[-1]}","'unsupported'"}){
+        js(scenario,"window.bridgeResult='pending';window.DugaNativeRuntime.call("+request+").then(()=>window.bridgeResult='unexpected success',e=>window.bridgeResult=e.message);");
+        awaitJs(scenario,"window.bridgeResult!=='pending'");
+        assertEquals("false",js(scenario,"window.bridgeResult==='unexpected success'"));
+      }
+      js(scenario,"window.bridgeResult='pending';window.DugaNativeRuntime.call('copy',{text:'Valid retry'}).then(()=>window.bridgeResult='ok');");
+      awaitJs(scenario,"window.bridgeResult==='ok'");
+    }
+  }
+  @Test public void cancellingExportAndSharePreservesEmbeddedAndTopLevelRooms()throws Exception {
+    try(ActivityScenario<MainActivity> scenario=ActivityScenario.launch(MainActivity.class)){
+      ready(scenario);
+      js(scenario,"document.querySelector('[data-view=code]').click();document.querySelector('#workspace-open').click();");
+      awaitJs(scenario,"document.querySelector('#workspace').contentDocument?.querySelector('#join-gpu') != null");
+      for(boolean topLevel:new boolean[]{false,true}){
+        if(topLevel){tapWeb(scenario,".workspace-intro a[target=_blank]");awaitJs(scenario,"location.pathname==='/room' && !!document.querySelector('#join-gpu')");}
+        js(scenario,"window.roomSession='unchanged';window.pauseCount=0;addEventListener('duga:android-pause',()=>pauseCount++);"+(topLevel?"":"document.querySelector('#workspace').contentWindow.roomSession='embedded';"));
+        for(String request:new String[]{"'export',{filename:'duga.html',mime:'text/html',base64:'PGgxPkR1Z2E8L2gxPg=='}","'share',{text:'Duga',url:''}"}){
+          js(scenario,"window.dialogResult='pending';window.DugaNativeRuntime.call("+request+").then(()=>window.dialogResult='ok',e=>window.dialogResult=e.message);");
+          cancelAndroidDialog(scenario);
+          awaitJs(scenario,"window.dialogResult!=='pending'");
+          assertEquals("true",js(scenario,"window.roomSession==='unchanged' && window.pauseCount===0"+(topLevel?" && location.pathname==='/room'":" && document.querySelector('#workspace').contentWindow.roomSession==='embedded'")));
+        }
+        // Once the dialog returns, ordinary backgrounding must still disconnect rooms.
+        scenario.moveToState(androidx.lifecycle.Lifecycle.State.CREATED);
+        scenario.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED);
+        if(topLevel)ready(scenario);
+        else awaitJs(scenario,"!document.querySelector('#workspace').hasAttribute('src')");
+      }
     }
   }
   @Test public void bundledAssistantStartsWithoutWebsiteAndUsesScopedNativeBridge()throws Exception {

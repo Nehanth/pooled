@@ -21,12 +21,12 @@ public final class MainActivity extends Activity {
   private final Object modelLock=new Object();
   private long modelHandle;
   private ModelFiles models;
-  private boolean backgrounded,approved,destroyed;
+  private boolean backgrounded,approved,destroyed,appDialogPending;
   private byte[] exportData;
   private String exportId;
   private JavaScriptReplyProxy exportReply;
   private TextView loadStatus;
-  private static final int SAVE_DOCUMENT=30;
+  private static final int SAVE_DOCUMENT=30,SHARE_TEXT=31;
 
   @Override public void onCreate(Bundle state) {
     super.onCreate(state);
@@ -82,10 +82,11 @@ public final class MainActivity extends Activity {
     if(WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)){
       WebViewCompat.addWebMessageListener(web,"DugaAndroid",Collections.singleton(UrlPolicy.ORIGIN),(view,message,origin,mainFrame,reply)->{
         if(!UrlPolicy.isApp(origin.toString())||message.getType()!=WebMessageCompat.TYPE_STRING)return;
-        try {BridgeRequest r=new BridgeRequest(message.getData());
+        String id=null;
+        try {JSONObject json=BridgeRequest.parse(message.getData());id=BridgeRequest.requestId(json);BridgeRequest r=new BridgeRequest(json);
           if(!mainFrame&&!Set.of("copy","share","export").contains(r.type)){respond(reply,r.id,null,"Native inference is available only to the main assistant page.");return;}
           handle(r,reply);
-        }catch(Exception e){Toast.makeText(this,"Invalid Android request",Toast.LENGTH_SHORT).show();}
+        }catch(Exception e){if(id!=null)respond(reply,id,null,e.getMessage()==null?"Invalid Android request":e.getMessage());else Toast.makeText(this,"Invalid Android request",Toast.LENGTH_SHORT).show();}
       });
     }else loadStatus.setText("Update Android System WebView to enable the native Vulkan bridge.");
     String launch=readInvite(getIntent());web.loadUrl(launch==null?UrlPolicy.ORIGIN+"/":launch);
@@ -98,8 +99,8 @@ public final class MainActivity extends Activity {
       case "cancel":cancelNative();respond(reply,r.id,new JSONObject(),null);return;
       case "close":cancelNative();worker.execute(this::closeNative);respond(reply,r.id,new JSONObject(),null);return;
       case "copy":((ClipboardManager)getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("Duga",r.text("text",65536)));respond(reply,r.id,new JSONObject(),null);return;
-      case "share":String text=r.text("text",65536),url=r.text("url",4096);if(!url.isEmpty()&&!UrlPolicy.isApp(url)&&!UrlPolicy.external(url))throw new JSONException("Unsupported share URL");if(UrlPolicy.isApp(url))url="https://duga.app"+Uri.parse(url).getEncodedPath()+(Uri.parse(url).getEncodedFragment()==null?"":"#"+Uri.parse(url).getEncodedFragment());Intent share=new Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT,text+(url.isEmpty()?"":"\n"+url));startActivity(Intent.createChooser(share,getString(R.string.share_prompt)));respond(reply,r.id,new JSONObject(),null);return;
-      case "export":if(exportReply!=null){respond(reply,r.id,null,"Finish the current export first.");return;}String name=r.filename(),type=r.mime();exportData=r.exportBytes();exportId=r.id;exportReply=reply;startActivityForResult(new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType(type).putExtra(Intent.EXTRA_TITLE,name),SAVE_DOCUMENT);return;
+      case "share":String text=r.text("text",65536),url=r.text("url",4096);if(!url.isEmpty()&&!UrlPolicy.isApp(url)&&!UrlPolicy.external(url))throw new JSONException("Unsupported share URL");if(UrlPolicy.isApp(url))url="https://duga.app"+Uri.parse(url).getEncodedPath()+(Uri.parse(url).getEncodedFragment()==null?"":"#"+Uri.parse(url).getEncodedFragment());Intent share=new Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT,text+(url.isEmpty()?"":"\n"+url));openAppDialog(Intent.createChooser(share,getString(R.string.share_prompt)),SHARE_TEXT);respond(reply,r.id,new JSONObject(),null);return;
+      case "export":if(exportReply!=null){respond(reply,r.id,null,"Finish the current export first.");return;}String name=r.filename(),type=r.mime();byte[] bytes=r.exportBytes();exportData=bytes;exportId=r.id;exportReply=reply;try{openAppDialog(new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType(type).putExtra(Intent.EXTRA_TITLE,name),SAVE_DOCUMENT);}catch(Exception e){clearExport();throw e;}return;
       case "load":if(!approved){new AlertDialog.Builder(this).setTitle("Enable experimental native Vulkan?").setMessage("Original shaders and native shaders must match exactly on this GPU before loading. This kernel check does not guarantee every phone or conversation; the backend remains experimental. First use downloads about 640 MB of Qwen3 weights to app-private storage. No hosted inference fallback.").setPositiveButton("Validate & download",(d,w)->{approved=true;load(r,reply);}).setNegativeButton("Cancel",(d,w)->respond(reply,r.id,null,"Native Vulkan preparation cancelled.")).setOnCancelListener(d->respond(reply,r.id,null,"Native Vulkan preparation cancelled.")).show();}else load(r,reply);return;
       case "evaluate":int[] ids=r.tokens();boolean reset=r.json.optBoolean("reset",false);worker.execute(()->{try{long h; synchronized(modelLock){h=modelHandle;}if(h==0)throw new IllegalStateException("Native model is not loaded");int token=NativeVulkan.evaluate(h,ids,reset);respond(reply,r.id,new JSONObject().put("token",token),null);}catch(Exception e){respond(reply,r.id,null,e.getMessage());}});return;
       default:throw new JSONException("Unsupported request");
@@ -121,13 +122,24 @@ public final class MainActivity extends Activity {
   private void closeNative(){synchronized(modelLock){if(modelHandle!=0){NativeVulkan.close(modelHandle);modelHandle=0;}}}
   private void progress(JavaScriptReplyProxy reply,String id,String status,long done,long total){try{JSONObject m=new JSONObject().put("id",id).put("progress",new JSONObject().put("status",status).put("done",done).put("total",total));runOnUiThread(()->{if(!destroyed&&WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER))reply.postMessage(m.toString());});}catch(JSONException ignored){}}
   private void respond(JavaScriptReplyProxy reply,String id,JSONObject result,String error){try{JSONObject m=new JSONObject().put("id",id);if(error!=null)m.put("error",error);else m.put("result",result==null?new JSONObject():result);runOnUiThread(()->{if(!destroyed&&WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER))reply.postMessage(m.toString());});}catch(JSONException ignored){}}
-  @Override protected void onActivityResult(int request,int result,Intent data){super.onActivityResult(request,result,data);if(request!=SAVE_DOCUMENT||exportReply==null)return;byte[] bytes=exportData;String id=exportId;JavaScriptReplyProxy reply=exportReply;exportReply=null;exportData=null;exportId=null;if(result!=RESULT_OK||data==null||data.getData()==null){respond(reply,id,null,"Export cancelled.");return;}Uri target=data.getData();worker.execute(()->{try(OutputStream out=getContentResolver().openOutputStream(target)){if(out==null)throw new IOException("Cannot open selected document");out.write(bytes);respond(reply,id,new JSONObject(),null);}catch(Exception e){respond(reply,id,null,"Could not write the selected document.");}});}
+  // Keep app-owned pickers/choosers distinct from ordinary backgrounding. Clear the
+  // exemption on their result (including cancellation), or immediately if launch fails.
+  private void openAppDialog(Intent intent,int request){
+    if(appDialogPending)throw new IllegalStateException("Finish the current Android dialog first.");
+    appDialogPending=true;
+    try{startActivityForResult(intent,request);}catch(RuntimeException e){appDialogPending=false;throw e;}
+  }
+  private void clearExport(){exportReply=null;exportData=null;exportId=null;}
+  @Override protected void onActivityResult(int request,int result,Intent data){super.onActivityResult(request,result,data);if(request==SAVE_DOCUMENT||request==SHARE_TEXT)appDialogPending=false;if(request!=SAVE_DOCUMENT||exportReply==null)return;byte[] bytes=exportData;String id=exportId;JavaScriptReplyProxy reply=exportReply;clearExport();if(result!=RESULT_OK||data==null||data.getData()==null){respond(reply,id,null,"Export cancelled.");return;}Uri target=data.getData();worker.execute(()->{try(OutputStream out=getContentResolver().openOutputStream(target)){if(out==null)throw new IOException("Cannot open selected document");out.write(bytes);respond(reply,id,new JSONObject(),null);}catch(Exception e){respond(reply,id,null,"Could not write the selected document.");}});}
   private void openExternal(String url){if(!UrlPolicy.external(url))return;try{startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(url)).addCategory(Intent.CATEGORY_BROWSABLE));}catch(ActivityNotFoundException e){Toast.makeText(this,"No browser is available",Toast.LENGTH_SHORT).show();}}
-  private void goBack(){if(web.canGoBack())web.goBack();else new AlertDialog.Builder(this).setTitle("Close Duga?").setMessage("Active work and room connections will stop. Saved notes remain on this device.").setPositiveButton("Close",(d,w)->finish()).setNegativeButton("Stay",null).show();}
+  private void goBack(){
+    boolean history=web.canGoBack();
+    new AlertDialog.Builder(this).setTitle(history?"Leave this page?":"Close Duga?").setMessage("Active work and room connections will stop. Saved notes remain on this device.").setPositiveButton(history?"Leave":"Close",(d,w)->{if(history){cancelNative();web.goBack();}else finish();}).setNegativeButton("Stay",null).show();
+  }
   // API 33+ uses the native OnBackInvokedCallback registered in onCreate; this override is only the legacy fallback.
   @SuppressLint("GestureBackNavigation")
   @Override public void onBackPressed(){if(Build.VERSION.SDK_INT<33)goBack();else super.onBackPressed();}
-  @Override protected void onStop(){super.onStop();backgrounded=true;cancelNative();worker.execute(this::closeNative);if(web!=null){web.evaluateJavascript("window.dispatchEvent(new Event('duga:android-pause'))",null);web.onPause();web.pauseTimers();if(web.getUrl()!=null&&!web.getUrl().startsWith(UrlPolicy.ORIGIN+"/#")&&!web.getUrl().equals(UrlPolicy.ORIGIN+"/"))web.loadUrl(UrlPolicy.ORIGIN+"/");}}
+  @Override protected void onStop(){super.onStop();if(appDialogPending)return;backgrounded=true;cancelNative();worker.execute(this::closeNative);if(web!=null){web.evaluateJavascript("window.dispatchEvent(new Event('duga:android-pause'))",null);web.onPause();web.pauseTimers();if(web.getUrl()!=null&&!web.getUrl().startsWith(UrlPolicy.ORIGIN+"/#")&&!web.getUrl().equals(UrlPolicy.ORIGIN+"/"))web.loadUrl(UrlPolicy.ORIGIN+"/");}}
   @Override protected void onResume(){super.onResume();if(web!=null){web.resumeTimers();web.onResume();if(backgrounded){Toast.makeText(this,R.string.background_notice,Toast.LENGTH_LONG).show();backgrounded=false;}}}
   @Override protected void onDestroy(){destroyed=true;cancelNative();worker.execute(this::closeNative);worker.shutdown();if(web!=null){web.stopLoading();web.destroy();web=null;}super.onDestroy();}
   private static String mime(String p){if(p.endsWith(".html"))return "text/html";if(p.endsWith(".js"))return "application/javascript";if(p.endsWith(".css"))return "text/css";if(p.endsWith(".svg"))return "image/svg+xml";if(p.endsWith(".png"))return "image/png";if(p.endsWith(".woff2"))return "font/woff2";return "application/json";}

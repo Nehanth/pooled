@@ -23,7 +23,17 @@ public class PolicyTest {
     assertThrows(JSONException.class,()->new BridgeRequest("{\"id\":\"a\",\"type\":\"evaluate\",\"ids\":[-1]}").tokens());
     assertThrows(JSONException.class,()->new BridgeRequest("{\"id\":\"a\",\"type\":\"evaluate\",\"ids\":[1.2]}").tokens());
     assertThrows(JSONException.class,()->new BridgeRequest("{\"id\":\"a\",\"type\":\"export\",\"filename\":\"../secret\"}").filename());
-    assertThrows(JSONException.class,()->new BridgeRequest("{\"id\":\"a\",\"type\":\"export\",\"mime\":\"text/html\"}").mime());
+    assertEquals("text/html",new BridgeRequest("{\"id\":\"a\",\"type\":\"export\",\"mime\":\"text/html;charset=utf-8\"}").mime());
+    assertThrows(JSONException.class,()->new BridgeRequest("{\"id\":\"a\",\"type\":\"export\",\"mime\":\"application/x-executable\"}").mime());
     assertThrows(JSONException.class,()->new BridgeRequest("{\"id\":\"a\",\"type\":\"export\",\"base64\":\"!bad\"}").exportBytes());
+  }
+  @Test public void invalidRequestsRetainOnlyAValidatedReplyId() throws Exception {
+    for(String body:new String[]{"{\"id\":\"reply-1\",\"type\":\"shell\"}","{\"id\":\"reply-1\"}","{\"id\":\"reply-1\",\"type\":4}"}){
+      org.json.JSONObject json=BridgeRequest.parse(body);
+      assertEquals("reply-1",BridgeRequest.requestId(json));
+      assertThrows(JSONException.class,()->new BridgeRequest(json));
+    }
+    for(String body:new String[]{"{}","{\"id\":4}","{\"id\":\"\"}","{\"id\":\"bad id\"}","{\"id\":\""+"a".repeat(65)+"\"}"})
+      assertThrows(JSONException.class,()->BridgeRequest.requestId(BridgeRequest.parse(body)));
   }
 }
