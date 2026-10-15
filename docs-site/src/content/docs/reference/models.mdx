@@ -75,7 +75,7 @@ These stay in `room/models.js` for tests. The picker shows them with [`?dev=1`](
 | Qwen 3.5 122B MoE (122B-A10B) | GGUF Q4_0, two files, 72.52 GB | `Qwen35Engine` | 72 GB | 32768 / 131072 |
 | Qwen3.8-Flash-Next (preview) | GGUF Q4_0, three files, 100.6 GB (71.8 GB of layers, a 28.8 GB n-gram table) | `Qwen4ExpEngine` | 72 GB, plus the n-gram table on the device holding layer 1 | 2048 / 2048 |
 
-Qwen3 0.6B is the golden-test model. Qwen3.8-Flash-Next is a preview: it is listed with `?dev=1` on the page and `POOLED_DEV=1` in the terminal, its greedy output matches llama.cpp's golden ids, and rooms load it with dense attention, so its context is capped at 2048 tokens. A normal picker row (#370), running it in a tab with its experts on SSD (#368) and longer context are pending for 2.0. The 122B MoE has 48 layers and 256 experts, 8 active per token (about 10B of the 122B). Besides `?dev=1`, it is in the terminal's list: `pooled pull` and `pooled host` (from `@pooled/cli` 0.4.0) offer it with what it needs.
+Qwen3 0.6B is the golden-test model. Qwen3.8-Flash-Next is a preview: it is a row in the picker for everyone (`room/models.js` `DISK_COPY`) and needs `POOLED_DEV=1` for `pooled host` / `pooled list`; its greedy output matches llama.cpp's golden ids. A tab can keep its experts on the SSD (OPFS, after its user allows it), and a room node can park them in RAM or read them from its files. Rooms load it with QSA but cap its context at 2048 tokens; longer context is pending for 2.0. The 122B MoE has 48 layers and 256 experts, 8 active per token (about 10B of the 122B). Besides `?dev=1`, it is in the terminal's list: `pooled pull` and `pooled host` (from `@pooled/cli` 0.4.0) offer it with what it needs.
 
 ## Experts in system RAM
 

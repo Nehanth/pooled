@@ -200,7 +200,7 @@ With `--disk` (on `pooled join` and `pooled host`, `--here` too), a computer tha
 - Each computer first keeps all the experts its `--ram` can hold, and only the rest stay on disk. It keeps at least 2 GB of that RAM for the disk cache.
 - It is slower than experts in RAM: every token waits for some reads. Answers are the same, bit for bit.
 - It needs the model on this computer's disk (`pooled pull`, or the download `pooled join` and `pooled host` do; not `--no-pull`), a discrete GPU and `--ram` of at least 2 GB. Unified memory (Apple silicon, the GB10) doesn't do it yet.
-- This is the terminal's disk tier. A browser tab has its own one in progress: Qwen3.8-Flash-Next in a Chrome tab with its experts copied once into the browser's storage (OPFS) and read from the SSD per token. On main it exists only as a bench page (`tests/bench/tab_disk.html`); turning it on in rooms is pending for 2.0 (#368).
+- This is the terminal's disk tier. A browser tab has its own one for Qwen3.8-Flash-Next: after its user allows it, the tab copies its layers' experts once into the browser's storage (OPFS) and reads the ones each token needs from the SSD (#368).
 
 The header shows `disk`, and the host's log says which layers each device reads from disk and how much RAM their cache takes.
 
@@ -379,7 +379,7 @@ qwen3.6-35b-moe    Qwen3.6 35B MoE · Q4
 qwen3.5-122b-moe   Qwen3.5 122B MoE · Q4
 ```
 
-With `POOLED_DEV=1`, the list also has `qwen3.8-flash` (Qwen3.8-Flash-Next · Q4, a 100.6 GB download in three files: 71.8 GB of layers and a 28.8 GB n-gram table). It is a preview: rooms cap its context at 2048 tokens, and a normal picker row is pending for 2.0 (#370).
+With `POOLED_DEV=1`, the list also has `qwen3.8-flash` (Qwen3.8-Flash-Next · Q4, a 100.6 GB download in three files: 71.8 GB of layers and a 28.8 GB n-gram table). It is a preview: rooms cap its context at 2048 tokens (longer context is pending for 2.0). `pooled join` needs no flag to lend to a room that runs it, and `pooled pull qwen3.8-flash` / `pooled rm qwen3.8-flash` take its full name without `POOLED_DEV=1`.
 
 The Qwen3.5 122B MoE is a 72.5 GB download (two files) and needs about 73 GB across the room. It is for a room of big machines, or one with a PC that keeps its experts in RAM. The room page lists it only with `?dev=1`.
 

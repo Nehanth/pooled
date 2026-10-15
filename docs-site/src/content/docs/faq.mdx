@@ -65,7 +65,7 @@ Yes, on every device that holds layers. Pooled asks the browser to keep it on. I
 
 ### Which model should I pick?
 
-The biggest one the room has memory for: Qwen3 1.7B at 4 GB (8K context; 5.6 GB for 16K), Qwen3.8 27B at 17 GB, Qwen3.6 35B MoE at 22.5 GB. The picker preselects it. Two bigger MoE models are in preview behind `?dev=1` (and in the terminal): Qwen3.5 122B MoE at about 73 GB and Qwen3.8-Flash-Next at about 72 GB plus its 28.8 GB n-gram table. The MoE is also the fastest of the big two. See [Pick a model](/docs/models).
+The biggest one the room has memory for: Qwen3 1.7B at 4 GB (8K context; 5.6 GB for 16K), Qwen3.8 27B at 17 GB, Qwen3.6 35B MoE at 22.5 GB. The picker preselects it. Two bigger MoE models are in preview: Qwen3.5 122B MoE at about 73 GB (behind `?dev=1`, and in the terminal), and Qwen3.8-Flash-Next, a picker row of its own that needs about 8 GB of GPU memory on one tab that keeps its experts on disk (it asks first). The MoE is also the fastest of the big two. See [Pick a model](/docs/models).
 
 ### Why is it slower than running the model natively?
 
