@@ -4,7 +4,7 @@
     <img src="site/logo/wordmark-light.svg" height="56" alt="pooled">
   </picture></a>
 </p>
-<p align="center"><b>Peer-to-peer LLM inference in the browser. Pool your devices to run big open models, for chat and coding agents. Models bigger than your GPU run from your SSD.</b></p>
+<p align="center"><b>Peer-to-peer LLM inference in the browser. Pool your devices to run big open models, for chat and coding agents.</b></p>
 <p align="center">
   <a href="https://pooled.run">Site</a> ·
   <a href="https://pooled.run/room">Start a room</a> ·
