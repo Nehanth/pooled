@@ -9,5 +9,5 @@ abstract: "Pooled runs one open language model across the devices in a room, in 
 repository-code: "https://github.com/Nehanth/pooled"
 url: "https://pooled.run"
 license: MIT
-version: 3.0.0
+version: 2.0.0
 date-released: 2026-10-16
