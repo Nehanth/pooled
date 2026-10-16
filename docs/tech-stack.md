@@ -29,7 +29,7 @@ What Pooled is built from, and why each piece was chosen. There is no build step
 
 ## Models
 
-Qwen 3.8 27B (hybrid Gated-DeltaNet + attention, `qwen35` architecture family), Qwen 3.6 35B MoE and Qwen3.5-122B MoE (`qwen35moe`), Qwen3 0.6B/1.7B/4B (dense), SmolLM2 135M. See [models.md](models.md).
+Qwen 3.8 27B (hybrid Gated-DeltaNet + attention, `qwen35` architecture family), Qwen 3.6 35B MoE (`qwen35moe`), Qwen3 0.6B/1.7B/4B (dense), SmolLM2 135M. See [models.md](models.md).
 
 ## Things deliberately not used
 

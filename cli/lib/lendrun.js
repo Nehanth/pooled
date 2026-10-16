@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, statfsSync } from "node:fs";
 import os from "node:os";
 import { parseLendArgs, parseGb, detectMemory, memoryRule, ramRule, diskRule, afterCheck, formatStatus, tpsFromStats, explainError, versionFromBye,
-  hostable, devHint, ctxNote, autoRedeal, fmtGb, fmtCode, passCounter, deviceName, UsageError, HELP_JOIN, HELP_HOST, needsRoom, loadText,
+  hostable, devHint, devOn, DEV_MODELS, ctxNote, autoRedeal, fmtGb, fmtCode, passCounter, deviceName, UsageError, HELP_JOIN, HELP_HOST, needsRoom, loadText,
   pullPlan, autoLine, LEND_MAX_GB } from "./lend.js";
 import { dawnLoader, quietLoader, driverLog } from "./dawn.js";
 import { cleanText } from "./common.js";
@@ -147,7 +147,7 @@ async function runDry(opts) {
   if (opts.disk && !disk.on) w(`  (${disk.why})`);
   w("");
   w("In a room running:");
-  const keys = Object.keys(rn.MODELS).filter((k) => rn.FILES?.[k] && (hostable(rn.MODELS, true).includes(k)));
+  const keys = Object.keys(rn.MODELS).filter((k) => rn.FILES?.[k] && hostable(rn.MODELS, true).includes(k) && (devOn() || !DEV_MODELS.includes(k)));
   for (const k of keys) {
     const m = modelPlan(rn, k, opts);
     const p = m.plan;

@@ -334,17 +334,23 @@ export function ctxNote(rn, model, ask) {
   return `the ${name}'s context is ${got}; using that`;
 }
 // The models pooled host / pull / list offer. A preview model's kind (Qwen3.8-Flash-Next, qwen4exp: its own engine,
-// context <= 2048, no MTP in rooms yet) is listed and accepted only with POOLED_DEV=1, as the room page lists the 122B
-// only with ?dev=1. A room node still loads one a host deals it (pooled join).
+// context <= 2048, no MTP in rooms yet) is listed and accepted only with POOLED_DEV=1, as the room page lists the
+// models outside its picker only with ?dev=1. DEV_MODELS: models kept for developers only, hidden the same way
+// (Qwen3.5 122B MoE: still in room/models.js and the engine's tests, not offered to users). pooled pull / rm take
+// either named in full without the flag (pullrun.js), and a room node still loads one a host deals it (pooled join).
 export const DEV_KINDS = ["qwen4exp"];
+export const DEV_MODELS = ["qwen3.5-122b-moe"];
 export const devOn = (env = process.env) => env.POOLED_DEV === "1";
-export const hostable = (models, dev = devOn()) => Object.keys(models).filter((k) => models[k].kind === "gguf" || models[k].kind === "qwen35" || (dev && DEV_KINDS.includes(models[k].kind)));
-// a preview model named without POOLED_DEV=1: what to say ("" for any other name)
+export const devModel = (models, k) => DEV_KINDS.includes(models[k]?.kind) || DEV_MODELS.includes(k);
+export const hostable = (models, dev = devOn()) => Object.keys(models).filter((k) =>
+  (models[k].kind === "gguf" || models[k].kind === "qwen35" || DEV_KINDS.includes(models[k].kind)) && (dev || !devModel(models, k)));
+// a preview or developer model named without POOLED_DEV=1: what to say ("" for any other name)
 export function devHint(models, given, dev = devOn()) {
   if (dev || !models) return "";
   const t = String(given || "").trim().toLowerCase();
-  const hit = Object.keys(models).filter((k) => DEV_KINDS.includes(models[k].kind) && (k === t || (t.length > 2 && k.includes(t))));
-  return hit.length === 1 ? `${hit[0]} is a preview: set POOLED_DEV=1 to use it` : "";
+  const hit = Object.keys(models).filter((k) => devModel(models, k) && (k === t || (t.length > 2 && k.includes(t))));
+  if (hit.length !== 1) return "";
+  return DEV_MODELS.includes(hit[0]) ? `${hit[0]} is a developer model: set POOLED_DEV=1 to use it` : `${hit[0]} is a preview: set POOLED_DEV=1 to use it`;
 }
 
 // ---------------- the memory rule ----------------

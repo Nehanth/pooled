@@ -28,7 +28,6 @@ Pooled ships no weights: browsers fetch tensors from Hugging Face with range req
 |---|---|---|---|
 | Qwen 3.8 27B | GGUF Q4_0, about 15 GB, with the `nextn` draft layer | `Qwen35Engine` | 64 layers: 48 Gated DeltaNet and 16 attention. Speculative decoding with the built-in draft layer. |
 | Qwen 3.6 35B MoE (A3B) | GGUF Q4_0 (bartowski) | `Qwen35Engine` (`qwen35moe`) | 256 experts, 8 active per token. Router, experts and shared expert run on the GPU. |
-| Qwen3.5 122B-A10B MoE | GGUF | `Qwen35Engine` (`qwen35moe`) | Runs in the engine and its tests. Not in the room's picker. |
 | Qwen3 4B, 1.7B, 0.6B | GGUF Q4_0 or Q8_0 | `DenseEngine` | 0.6B is the golden-test model. |
 | SmolLM2 135M | safetensors f32 | `DenseEngine` | The smallest demo. Quantized to Q8 at load. |
 
