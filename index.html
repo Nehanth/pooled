@@ -6,11 +6,11 @@
 <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=2">
 <title>pooled: pool your devices, run AI together</title>
 <link rel="canonical" href="https://pooled.run/">
-<meta name="description" content="Peer-to-peer LLM inference in the browser. Pool your devices to run big open models, for chat and coding agents. Open source, MIT.">
+<meta name="description" content="Peer-to-peer LLM inference in the browser. Pool your devices to run big open models, for chat and coding agents. Models bigger than your GPU run from your SSD. Open source, MIT.">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="pooled">
 <meta property="og:title" content="pooled: pool your devices, run AI together">
-<meta property="og:description" content="Peer-to-peer LLM inference in the browser. Pool your devices to run big open models, for chat and coding agents. Open source, MIT.">
+<meta property="og:description" content="Peer-to-peer LLM inference in the browser. Pool your devices to run big open models, for chat and coding agents. Models bigger than your GPU run from your SSD. Open source, MIT.">
 <meta property="og:url" content="https://pooled.run/">
 <meta property="og:image" content="https://pooled.run/site/og.png?v=2">
 <meta property="og:image:width" content="1200">
@@ -18,7 +18,7 @@
 <meta property="og:image:alt" content="pooled: Pool your devices. Run AI together. Below, the demo: a Tetris game an agent wrote, on a model pooled across three devices">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="pooled: pool your devices, run AI together">
-<meta name="twitter:description" content="Peer-to-peer LLM inference in the browser. Pool your devices to run big open models, for chat and coding agents. Open source, MIT.">
+<meta name="twitter:description" content="Peer-to-peer LLM inference in the browser. Pool your devices to run big open models, for chat and coding agents. Models bigger than your GPU run from your SSD. Open source, MIT.">
 <meta name="twitter:image" content="https://pooled.run/site/og.png?v=2">
 <meta name="twitter:image:alt" content="pooled: Pool your devices. Run AI together. Below, the demo: a Tetris game an agent wrote, on a model pooled across three devices">
 <meta name="theme-color" content="#F6F5F1">
@@ -71,7 +71,7 @@
     <canvas class="swarm" id="swarm" aria-hidden="true"></canvas>
     <div class="wrap hero-in">
       <h1>Pool your devices. <span>Run AI together.</span></h1>
-      <p class="sub">Peer-to-peer LLM inference in the browser. Pool your devices to run big open models, for chat and coding agents.</p>
+      <p class="sub">Peer-to-peer LLM inference in the browser. Pool your devices to run big open models, for chat and coding agents. Models bigger than your GPU run from your SSD.</p>
     </div>
   </header>
 
@@ -160,6 +160,7 @@
                     <li class="ok" data-need="4"><span class="rn">Qwen3 1.7B</span><span class="fig"><span class="nd">4 GB</span><b>fits</b><span class="more"></span></span></li>
                     <li class="ok" data-need="17"><span class="rn">Qwen3.8 27B</span><span class="fig"><span class="nd">17 GB</span><b>fits</b><span class="more"></span></span></li>
                     <li class="ok sel" data-need="22.5"><span class="rn">Qwen3.6 35B MoE</span><span class="fig"><span class="nd">22.5 GB</span><b>fits</b><span class="more"></span></span></li>
+                    <li class="ok dk" data-need="8" title="Qwen3.8 Flash: a 125B model (6B active) that keeps most of itself on disk, so it needs far less GPU memory"><span class="rn"><span class="rnm">Qwen3.8 Flash</span><span class="xp">experimental</span></span><span class="fig"><span class="dkc"><span class="dkz">125B · </span><span class="dkr">runs </span>from disk</span><b>fits</b><span class="more"></span></span></li>
                   </ul>
                   <p class="cd-note">Each device downloads only its own layers, once. They stay cached for next time.</p>
                   <span class="mbtn blue" id="startBtn">Start the model</span>
