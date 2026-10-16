@@ -53,6 +53,59 @@ each has a switch for A/B timing on real hardware.
   that binds less than 256 MiB. Needle retrieval and speed at 32K..128K:
   `tests/needle_ctx.js` and docs/bench-log.md (2026-09-30).
 
+## The 27B and the 35B MoE: a context ladder, the longest at full speed by default (2026-10-16)
+
+Rooms no longer need `?ctx=` for a long context on the two big hybrids. Each has a ladder of lengths checked correct on it
+(`room/models.js` `CTX` `ladder`), and a room opens at the longest step its memory holds (`room/ctxpick.js`
+`roomCtxPlan`, called by the picker, Start, the room node behind `pooled host` / `pooled serve` / the OpenClaw plugin, and
+`pooled host`'s screen, so they all agree):
+
+| Model | Ladder | Picker's context row | Old default (`def`) | Why each length is on it |
+|---|---|---|---|---|
+| Qwen3.8 27B | 64K, 32K, 16K, 8K | 8K, 16K, 32K, 64K | 16K | needle found at 64K (2026-09-30) and 16K / 32K (2026-10-01); 8K is the same engine as 16K / 32K (below). 128K not checked: left out |
+| Qwen3.6 35B MoE | 128K, 64K, 32K, 16K, 8K | 8K, 32K, 64K, 128K | 32K | needle found at 32K, 64K, 96K, 128K (2026-09-30); `test_moe.js` MATCHes llama.cpp in a 131072-position engine (below); 8K / 16K are the 32K engine |
+
+The engine at 32K positions or fewer is one engine: the prefill split length is 256 for any `maxSeq` up to 32K
+(`engine/qwen35.js` `faSplit`), and decode's splits follow the filled length (`attn_dec` `decSplits`), so a 8K or 16K room
+computes what a 32K room does on any prompt that fits.
+
+**The trade-off.** A longer window costs memory (f16 K+V: 64 KB per token on the 27B, 20 KB on the MoE, split over the
+devices: the 27B needs ~17.0 GB at 16K and ~20 GB at 64K; the MoE ~21.0 GB at 32K and ~22.9 GB at 128K by the planner's
+bytes), not speed: decode reads only the filled positions. Measured on the GB10 (Deno `tests/bench_ctx.js`, FILLS=1K,8K,
+only `CTX` changed):
+
+| Model | maxSeq | 1K fill: prefill / plain / spec tok/s | 8K fill: prefill / plain / spec tok/s | tokens |
+|---|---|---|---|---|
+| MoE | 32768 | 938 / 37.8 / 51.7 | 1159 / 35.6 / 50.6 | |
+| MoE | 131072 | 921 / 37.6 / 50.4 | 1155 / 36.3 / 51.1 | identical to 32768 |
+| 27B | 16384 | 247 / 10.58 / 19.9 | 277 / 10.23 / 21.3 | |
+| 27B | 65536 | 246 / 10.59 / 19.9 | 277 / 10.21 / 21.1 | identical to 16384 |
+
+`CTX=131072 tests/test_moe.js`: 3 of 3 MATCH llama.cpp, spec = plain (decode 60-61 tok/s; 55-58 at the usual 512 in the
+run just before).
+
+Memory can still cost speed in a room, two ways, so the default goes past `def` only when neither happens
+(`roomCtxPlan` `fastAt`, judged on the deal by memory): (1) the longer context leaves no room for the experts, and a device
+offloads them (each token then copies experts from RAM or disk); (2) it needs one more device holding layers than at
+`def` (a phone, or one more network hop every token). Such a room opens at `def`, and the longer lengths are one click away
+in the picker (Room settings changes it later; the model loads again). A room short of memory even for `def` walks the
+ladder down (to 8K) and says so; one that started at `def` before still starts there or longer.
+
+Example rooms (the picker's need per choice: `ctxOptions`, the GPU memory these devices need at that length):
+
+| Room | Model | 8K | 16K | 32K | 64K | 128K | Opens at |
+|---|---|---|---|---|---|---|---|
+| Mac 16 + desktop 7 + iPhone 1 (24 GB) | MoE | 20.9 | | 21.4 | 22.1 | 23.5 | 128K, the phone holds nothing |
+| Mac 17 + desktop 6 + iPhone 1 (24 GB) | MoE | | | | fits | fits with the phone | 64K (128K would put layers on the phone) |
+| Mac 14 + desktop 8 + iPhone 1 (23 GB) | MoE | 21.4 | | 21.8 | 22.5 | needs 0.7 GB more | 64K |
+| RTX 12 GB + 48 GB RAM (`pooled host --here`) | MoE | 6.2 | | 6.7 | 7.3 | 8.6 | 32K: experts in RAM at every length, so the default |
+| Mac 16 + desktop 8 (24 GB) | 27B | 16.5 | 17.0 | 18.0 | 20.1 | | 64K |
+| a 16 GB laptop alone | 27B | short | short | short | short | | short (for 8K) |
+
+`?ctx=N` and `--ctx N` still ask for an exact length, tried alone. Tests: `tests/unit/ctxpick_test.js` (the picker and
+Start agree for these rooms at every choice; the default rule), `cli/test/hostui_test.mjs` (the screen, the room node and
+the page agree), `packages/room-node/test/roomnode_test.mjs`.
+
 ## Qwen3.8 Flash in rooms: long context (rooms long-context PR 5, 2026-10-13)
 
 Rooms run Flash with QSA and f16 K / V, at up to **64K** (65,536 tokens), the longest context checked against llama.cpp
