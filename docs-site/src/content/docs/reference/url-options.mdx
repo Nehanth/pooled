@@ -53,7 +53,7 @@ Supported and stable.
 | Qwen 3.8 27B | 16384 | 65536 |
 | Qwen 3.6 35B MoE | 32768 | 131072 |
 | Qwen3.5 122B MoE (`?dev=1`) | 32768 | 131072 |
-| Qwen3.8-Flash-Next (preview) | 2048 | 2048 (longer context is pending for 2.0) |
+| Qwen3.8-Flash-Next (experimental) | 65536 (a room short of memory opens at the longest proven length it holds: 32768, 16384, 8192 or 2048) | 65536 (128K is in progress) |
 | Other models (tests and `?dev=1`) | 2048 (8192 on the hybrid engine) | same |
 
 Long context costs little memory on the 27B and MoE; what limits it is how long the prompt takes to read. See [Long context and sessions](/docs/internals/sessions).

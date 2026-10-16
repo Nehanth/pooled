@@ -379,7 +379,7 @@ qwen3.6-35b-moe    Qwen3.6 35B MoE · Q4
 qwen3.5-122b-moe   Qwen3.5 122B MoE · Q4
 ```
 
-With `POOLED_DEV=1`, the list also has `qwen3.8-flash` (Qwen3.8-Flash-Next · Q4, a 100.6 GB download in three files: 71.8 GB of layers and a 28.8 GB n-gram table). It is a preview: rooms cap its context at 2048 tokens (longer context is pending for 2.0). `pooled join` needs no flag to lend to a room that runs it, and `pooled pull qwen3.8-flash` / `pooled rm qwen3.8-flash` take its full name without `POOLED_DEV=1`.
+With `POOLED_DEV=1`, the list also has `qwen3.8-flash` (Qwen3.8-Flash-Next · Q4, a 100.6 GB download in three files: 71.8 GB of layers and a 28.8 GB n-gram table). It is experimental (the CLI calls it a preview): rooms run it at up to 64K tokens of context. The CLI on npm doesn't have Flash's newest code yet, so run the CLI from the repo to lend or host it (see the [CLI README](https://github.com/Nehanth/pooled/blob/main/cli/README.md#qwen38-flash-experimental-run-the-cli-from-the-repo)). `pooled join` needs no flag to lend to a room that runs it, and `pooled pull qwen3.8-flash` / `pooled rm qwen3.8-flash` take its full name without `POOLED_DEV=1`.
 
 The Qwen3.5 122B MoE is a 72.5 GB download (two files) and needs about 73 GB across the room. It is for a room of big machines, or one with a PC that keeps its experts in RAM. The room page lists it only with `?dev=1`.
 

@@ -4,7 +4,7 @@
     <img src="site/logo/wordmark-light.svg" height="56" alt="pooled">
   </picture></a>
 </p>
-<p align="center"><b>Peer-to-peer LLM inference in the browser. Pool your devices to run big open models, for chat and coding agents.</b></p>
+<p align="center"><b>Peer-to-peer LLM inference in the browser. Pool your devices to run big open models, for chat and coding agents. Models bigger than your GPU run from your SSD.</b></p>
 <p align="center">
   <a href="https://pooled.run">Site</a> ·
   <a href="https://pooled.run/room">Start a room</a> ·
@@ -21,10 +21,9 @@
 
 https://github.com/user-attachments/assets/5142d877-e4d5-4f6b-9b5e-0ef48dcb73f6
 
-<!-- PENDING 2.0: replace this video and caption with the Qwen3.8-Flash demo (Mac tab with experts on SSD, then a PC joins with `pooled join`) once the video is attached to the 2.0 release (#368, #370 and the speed panel, #353, are on main). -->
 <p align="center"><sub>Demo, recorded September 27, 2026 (2:29, with voice and subtitles): Qwen 3.6 35B MoE across a Mac and an iPhone in browser tabs. The phone chats with it, then Code mode builds a Tetris game, fixes its own bug and restyles it. <a href="https://github.com/Nehanth/pooled/releases/download/v1.0.0/pooled-demo-2026-09-27.mp4">Download</a> · <a href="https://github.com/Nehanth/pooled/releases/download/v0.2.0/swarmllm-demo-2026-09-07.mp4">the September 7 demo</a>.</sub></p>
 
-Pooled runs one open model across the devices in a room. Your laptop, a friend's desktop and a phone each hold some of the model's layers, and together they run a model none of them could run alone. You can chat with it, or switch to Code mode and let it build and fix a small app right in the tab. There is nothing to install and no account, and no server does any of the thinking.
+Pooled runs one open model across the devices in a room. Your laptop, a friend's desktop and a phone each hold some of the model's layers, and together they run a model none of them could run alone. A model bigger than a device's GPU memory keeps most of itself on the SSD and streams what each token needs into the GPU (Qwen3.8 Flash, 125B, experimental), and every device that joins holds more of it in memory, so it gets faster. You can chat with it, or switch to Code mode and let it build and fix a small app right in the tab. There is nothing to install and no account, and no server does any of the thinking.
 
 ## How it works
 
@@ -66,6 +65,8 @@ It is **experimental**:
 - It is slower than the other models, most of all on one computer, where much of it comes from disk.
 - The first run downloads about 99 GB and asks before storing it on the device.
 - How it loads and what it needs may change between releases.
+
+Demo video: [Qwen3.8 Flash in a Chrome tab on a Mac Studio, then an RTX 5070 PC joins](https://pooled.run/docs/media/flash-demo.mp4) (recorded October 13, 2026, 2:13, subtitles; the room gets 1.4x faster when the PC joins).
 
 Pick it in the room's model picker. To lend a computer from the command line, run the CLI from this repo for now, not from npm: [cli/README.md](cli/README.md#qwen38-flash-experimental-run-the-cli-from-the-repo).
 
