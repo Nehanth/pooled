@@ -32,7 +32,7 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
   const PREFILL_WINDOW = Number.isFinite(prefillWindow) ? Math.max(1, Math.floor(prefillWindow)) : 6;
   const { onStatus: aiStatus = () => {}, computePass = () => {}, teleNote = () => {},
     wakeChain = () => {}, keepWarm = () => {}, onFrame = () => {}, prefillFrame = () => undefined,
-    onWorkerFrame = () => {}, onError = (err) => aiStatus("⚠ " + err.message) } = hooks;
+    onTiming = null, onWorkerFrame = () => {}, onError = (err) => aiStatus("⚠ " + err.message) } = hooks;
   // Keep each consumer's diagnostics and checkpoint transport policy during extraction.
   // The node owns its CkptIndex; the browser checkpoint helpers below retain disk copies.
   const node = profile === "node";
@@ -40,6 +40,26 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
   const peerError = (pos) => `NaN in hidden returned by peers (pos ${pos})` + (node ? "" : " — check peer status lines");
   const headError = (pos) => `NaN in logits (pos ${pos})` + (node ? "" : " — head/lm_head kernel issue on host");
   const defaultStatus = aiStatus;
+
+  // Optional local measurements. No timing fields travel in inference frames.
+  function timing(phase, d, fields = {}) {
+    try {
+      onTiming({ phase, kind: d.t.endsWith("-b") ? "batch" : "token",
+        pos: d.basePos ?? d.pos, n: d.n || (d.t.endsWith("-b") ? 4 : 1), spec: !!d.spec,
+        payloadBytes: d.data?.byteLength ?? null, at: performance.now(), ...fields })?.catch?.(() => {});
+    } catch {}   // diagnostics must not change frame delivery or inference errors
+  }
+
+  // Completed host operations on the same clock. Fused operations stay fused;
+  // these elapsed intervals are not disjoint GPU kernel measurements.
+  function noteGeneration(event, fields) {
+    try { onTiming({ phase: "generation", event, at: performance.now(), ...fields })?.catch?.(() => {}); } catch {}
+  }
+
+  function noteOperation(operation, pos, n, startedAt) {
+    const at = performance.now();
+    try { onTiming({ phase: "operation", operation, pos, n, at, durationMs: at - startedAt })?.catch?.(() => {}); } catch {}
+  }
 
   // after: a promise (the frame queued ahead of this one on the chain): the timer starts once it settles, not at send.
   // Prompt frames wait behind each other at the slowest device, so frame k of a window would otherwise be timed for
@@ -73,6 +93,7 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
     }
     ai.frames = (ai.frames || 0) + 1;
     if (!node) ai.hostAmax = Math.max(0.9 * (ai.hostAmax || 0), wireStats.lastMax || 0);
+    if (onTiming) timing("dispatch", msg);
     sendHidden(ai.chain[0], { ...msg, ...ctl });
     // the chain saves with this frame: only now is it a checkpoint every device has, so only now
     // does the host's own copy go to disk (a reloaded host must not index a slot no worker saved)
@@ -261,14 +282,18 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
     if (!ai.chain.length && !needLogits) {
       // solo prefill: layers only, no head, no readback; sync every 8 tokens
       current.engine.pos = pos;
+      const started = onTiming ? performance.now() : 0;
       await current.engine.prefillToken(id);
       if (pos % 8 === 7) await ai.device.queue.onSubmittedWorkDone();
+      if (onTiming) noteOperation("prefill", pos, 1, started);
       ai.pos++; ai.fed?.push(id);
       return null;
     }
     const tHost = ahead?.t0 ?? performance.now();
     if (needLogits) wakeChain(pos);
+    const started = onTiming ? performance.now() : 0;
     let h = ahead?.h || await current.engine.embedRun(id, pos);
+    if (onTiming && !ahead?.h) noteOperation("host", pos, 1, started);
     if (badF32(h)) throw new Error(hostError(pos));
     if (ai.chain.length) {
       const hostMs = performance.now() - tHost;
@@ -283,14 +308,17 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
     } // solo mode: engine holds every layer, embedRun already produced the final hidden
     ai.pos++; ai.fed?.push(id);
     if (!needLogits || ahead?.defer) return null;   // prefill: skip the head entirely
+    const headStarted = onTiming ? performance.now() : 0;
     if (desc) {
       const c = await current.engine.headFromHiddenIds(h, desc);
+      if (onTiming) noteOperation("head", pos, 1, headStarted);
       if (c.bad) throw new Error(headError(ai.pos));
       return c;
     }
     const tHead = ai.lapLog ? performance.now() : 0;
     const logits = await current.engine.headFromHidden(h);
     if (ai.lapLog?.length) ai.lapLog[ai.lapLog.length - 1][2] = performance.now() - tHead;   // (the lap's head ms, ?dev=1)
+    if (onTiming) noteOperation("head", pos, 1, headStarted);
     if (badF32(logits)) throw new Error(headError(ai.pos));
     return logits;
   }
@@ -300,7 +328,9 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
     if (!ai.chain.length && current.engine.prefillTokens && ids.length > 1) {
       // solo: batched prefill, several prompt tokens per GPU pass
       current.engine.pos = ai.pos;
+      const started = onTiming ? performance.now() : 0;
       await current.engine.prefillTokens(ids.slice(0, -1));
+      if (onTiming) noteOperation("prefill", ai.pos, ids.length - 1, started);
       ai.pos = current.engine.pos;
       pushAll(ai.fed, ids, 0, ids.length - 1);   // (not push(...ids): a 128K prompt is past the engine's argument limit)
       return aiPipeToken(ids[ids.length - 1], true, undefined, desc);
@@ -348,20 +378,26 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
           ? +((node && prefillFrame()) || current.engine.prefillFrame()) || 0 : 0;
         while (F && ids.length - 1 - i >= 2 * NC && !aborted()) {
           const n = Math.min(F, ids.length - 1 - i), basePos = ai.pos;
-          await send(await current.engine.prefillHidden(ids.slice(i, i + n), basePos), basePos, i, n);
+          const started = onTiming ? performance.now() : 0;
+          const hb = await current.engine.prefillHidden(ids.slice(i, i + n), basePos);
+          if (onTiming) noteOperation("host", basePos, n, started);
+          await send(hb, basePos, i, n);
         }
         outer: for (const W of widths) while (ids.length - 1 - i >= W) {
           if (aborted()) break outer;
           const nChunks = Math.max(1, Math.min(Math.floor(16 / W), Math.floor((ids.length - 1 - i) / W)));
           const n = nChunks * W, basePos = ai.pos;
-          const hb = new Float32Array(n * hdim);
+          const hb = new Float32Array(n * hdim), started = onTiming ? performance.now() : 0;
           for (let c = 0; c < nChunks; c++)
             hb.set(await current.engine.embedRunBatch(ids.slice(i + c * W, i + (c + 1) * W), basePos + c * W), c * W * hdim);
+          if (onTiming) noteOperation("host", basePos, n, started);
           await send(hb, basePos, i, n);
         }
         if (flex && !aborted() && i < ids.length) {
           const n = ids.length - i, basePos = ai.pos, i0 = i;   // n <= 4: what the widths above left
+          const started = onTiming ? performance.now() : 0;
           const hb = await current.engine.embedRunBatch(ids.slice(i), basePos);
+          if (onTiming) noteOperation("host", basePos, n, started);
           if (badF32(hb)) throw new Error(`NaN in batched prefill (pos ${basePos})`);
           const p = lapWait("b" + basePos, frameMs(n), "prefill tail", ahead);
           p.catch(() => {});
@@ -375,10 +411,12 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
           fillDrafts(h, ids, i0, basePos, n);
           const dim = wireDim(current.engine);
           ai.lastHidden = h.slice((n - 1) * dim, n * dim);
+          const headStarted = onTiming ? performance.now() : 0;
           if (desc) {
             tailLogits = await current.engine.headFromHiddenIds(ai.lastHidden, desc);
             if (!node && tailLogits.bad) throw new Error(headError(ai.pos));
           } else tailLogits = await current.engine.headFromHidden(ai.lastHidden);
+          if (onTiming) noteOperation("head", basePos + n - 1, 1, headStarted);
           if (!node && !desc && badF32(tailLogits)) throw new Error(headError(ai.pos));
         }
         for (const p of inflight) await p;
@@ -403,63 +441,76 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
     ai.lapLog?.push([lapMs, hostMs, 0, performance.now() - lapMs]);   // (room.js window.__pooledGen, ?dev=1: every lap of one run: lap, host, head ms, start)
   }
 
-  async function workerFrame(d) {
+  async function workerFrame(d, receivedAt = null) {
     const current = node ? { engine: ai.engine } : ai;
     if (!current.engine) return;
-    const ctl = {};
-    // order matters: a pending rollback belongs to the answer that just ended, the save records
-    // that answer's final state, and only then may the state be reset or replaced by a checkpoint
-    // (also before a reset: the save may record the state first, and the host saved its own after
-    // its rollback)
-    if (d.rb != null) { current.engine.restoreDN?.(d.rb); ctl.rb = d.rb; }
-    if (d.sv != null) { current.engine.saveSlot?.(d.sv); if (!node) ckptPersist(d.sv); ctl.sv = d.sv; }
-    if (d.dp != null) { for (const k of [].concat(d.dp)) k === DROP_ALL ? current.engine.dropAllSlots?.() : current.engine.dropSlot?.(k); if (!node) ckptForget([].concat(d.dp)); ctl.dp = d.dp; }
-    if (d.reset) { current.engine.reset?.(); ctl.reset = 1; }
-    if (d.ld != null) { current.engine.loadSlot?.(d.ld); ctl.ld = d.ld; }
-    const t0 = performance.now();
-    if (d.t === "ai-hidden-b") {
-      // n hiddens in, my layers (batched), n hiddens on
-      const nTok = d.n || 4;
-      const wdim = wireDim(current.engine);
-      // tk: the frame's token ids, when the host sent them (engine.frameIds); they go on to the next device too
-      const { h: xs, ids: tk } = splitWire(d, nTok, wdim);
-      const NC = current.engine.NC || 4;
-      // A node host's wide prompt uses prefill kernels; verifies retain per-column state.
-      const wide = !d.spec && nTok >= 2 * NC && current.engine.prefillHidden && current.engine.prefillFrame?.() > 0;
-      const hb = wide ? await current.engine.prefillHidden(xs, d.basePos, ...(tk ? [{ ids: tk }] : [])) : new Float32Array(nTok * wdim);
-      if (!wide) for (let c = 0; c < nTok; c += NC) {
-        const m = Math.min(NC, nTok - c);
-        hb.set(await current.engine.runHiddenBatch(xs.subarray(c * wdim, (c + m) * wdim), d.basePos + c, d.spec ? { base: c, total: nTok } : false,
-          ...(tk ? [{ ids: tk.subarray(c, c + m) }] : [])), c * wdim);
+    const startedAt = onTiming ? performance.now() : 0;
+    let engineMs = null, forwardedAt = null;
+    try {
+      const ctl = {};
+      // order matters: a pending rollback belongs to the answer that just ended, the save records
+      // that answer's final state, and only then may the state be reset or replaced by a checkpoint
+      // (also before a reset: the save may record the state first, and the host saved its own after
+      // its rollback)
+      if (d.rb != null) { current.engine.restoreDN?.(d.rb); ctl.rb = d.rb; }
+      if (d.sv != null) { current.engine.saveSlot?.(d.sv); if (!node) ckptPersist(d.sv); ctl.sv = d.sv; }
+      if (d.dp != null) { for (const k of [].concat(d.dp)) k === DROP_ALL ? current.engine.dropAllSlots?.() : current.engine.dropSlot?.(k); if (!node) ckptForget([].concat(d.dp)); ctl.dp = d.dp; }
+      if (d.reset) { current.engine.reset?.(); ctl.reset = 1; }
+      if (d.ld != null) { current.engine.loadSlot?.(d.ld); ctl.ld = d.ld; }
+      const t0 = performance.now();
+      if (d.t === "ai-hidden-b") {
+        // n hiddens in, my layers (batched), n hiddens on
+        const nTok = d.n || 4;
+        const wdim = wireDim(current.engine);
+        // tk: the frame's token ids, when the host sent them (engine.frameIds); they go on to the next device too
+        const { h: xs, ids: tk } = splitWire(d, nTok, wdim);
+        const NC = current.engine.NC || 4;
+        // A node host's wide prompt uses prefill kernels; verifies retain per-column state.
+        const wide = !d.spec && nTok >= 2 * NC && current.engine.prefillHidden && current.engine.prefillFrame?.() > 0;
+        const tEngine = onTiming ? performance.now() : 0;
+        const hb = wide ? await current.engine.prefillHidden(xs, d.basePos, ...(tk ? [{ ids: tk }] : [])) : new Float32Array(nTok * wdim);
+        if (!wide) for (let c = 0; c < nTok; c += NC) {
+          const m = Math.min(NC, nTok - c);
+          hb.set(await current.engine.runHiddenBatch(xs.subarray(c * wdim, (c + m) * wdim), d.basePos + c, d.spec ? { base: c, total: nTok } : false,
+            ...(tk ? [{ ids: tk.subarray(c, c + m) }] : [])), c * wdim);
+        }
+        if (onTiming) engineMs = performance.now() - tEngine;
+        if (badF32(hb)) { if (!node) aiStatus(`⚠ NaN in batched prefill on this device`); sendTo(ai.hostId, { t: "ai-error", message: "NaN in batched prefill" }); }
+        teleNote(d.spec ? "spec" : "pre", performance.now() - t0, nTok);
+        if (!node) computePass(nTok, performance.now() - t0);
+        // the verify flag travels with the frame: every device snapshots its recurrent state per
+        // column, or a later rollback on it restores a stale snapshot
+        const bmsg = { basePos: d.basePos, n: nTok, ...(d.spec ? { spec: 1 } : {}), ...packWire(hb, ai.next === "host" ? null : tk) };
+        if (ai.next === "host") sendHidden(ai.hostId, { t: "ai-hiddenret-b", ...bmsg });
+        else sendHidden(ai.next, { t: "ai-hidden-b", ...bmsg, ...ctl });
+        if (onTiming) forwardedAt = performance.now();
+        if (!node && d.spec) keepWarm(d.basePos);
+      } else {
+        // one token: run my layers, forward along the chain
+        const { h: hin, ids: tk } = splitWire(d, 1, wireDim(current.engine));
+        if (!node && badF32(hin)) { aiStatus(`⚠ NaN ARRIVED at this device (pos ${d.pos}) — upstream peer broken`); }
+        const tEngine = onTiming ? performance.now() : 0;
+        const h = await current.engine.runHidden(hin, d.pos, ...(tk ? [{ ids: tk }] : []));
+        if (onTiming) engineMs = performance.now() - tEngine;
+        if (badF32(h)) {
+          if (!node) aiStatus(`⚠ NaN PRODUCED by this device (pos ${d.pos}, layers ${ai.range[0]}–${ai.range[1] - 1}) — GPU kernel issue here`);
+          sendTo(ai.hostId, { t: "ai-error", message: node ? `NaN produced on node layers ${ai.range[0]}-${ai.range[1] - 1}` : `NaN produced on worker layers ${ai.range[0]}–${ai.range[1] - 1}` });
+        }
+        teleNote("one", performance.now() - t0, 1);
+        if (!node) computePass(1, performance.now() - t0);
+        const msg = { pos: d.pos, ...packWire(h, ai.next === "host" ? null : tk) };
+        if (ai.next === "host") sendHidden(ai.hostId, { t: "ai-hiddenret", ...msg });
+        else sendHidden(ai.next, { t: "ai-hidden", ...msg, ...ctl });
+        if (onTiming) forwardedAt = performance.now();
+        if (!node) keepWarm(d.pos);
+        if (!node && d.pos % 8 === 0) aiStatus(`serving layers ${ai.range[0]}–${ai.range[1] - 1} — pos ${d.pos}`);
       }
-      if (badF32(hb)) { if (!node) aiStatus(`⚠ NaN in batched prefill on this device`); sendTo(ai.hostId, { t: "ai-error", message: "NaN in batched prefill" }); }
-      // every worker reports its compute to the host (room/tele.js: browser tabs and room nodes alike)
-      teleNote(d.spec ? "spec" : "pre", performance.now() - t0, nTok);
-      if (!node) computePass(nTok, performance.now() - t0);
-      // the verify flag travels with the frame: every device snapshots its recurrent state per
-      // column, or a later rollback on it restores a stale snapshot
-      const bmsg = { basePos: d.basePos, n: nTok, ...(d.spec ? { spec: 1 } : {}), ...packWire(hb, ai.next === "host" ? null : tk) };
-      if (ai.next === "host") sendHidden(ai.hostId, { t: "ai-hiddenret-b", ...bmsg });
-      else sendHidden(ai.next, { t: "ai-hidden-b", ...bmsg, ...ctl });
-      if (!node && d.spec) keepWarm(d.basePos);
-    } else {
-      // one token: run my layers, forward along the chain
-      const { h: hin, ids: tk } = splitWire(d, 1, wireDim(current.engine));
-      if (!node && badF32(hin)) { aiStatus(`⚠ NaN ARRIVED at this device (pos ${d.pos}) — upstream peer broken`); }
-      const h = await current.engine.runHidden(hin, d.pos, ...(tk ? [{ ids: tk }] : []));
-      if (badF32(h)) {
-        if (!node) aiStatus(`⚠ NaN PRODUCED by this device (pos ${d.pos}, layers ${ai.range[0]}–${ai.range[1] - 1}) — GPU kernel issue here`);
-        sendTo(ai.hostId, { t: "ai-error", message: node ? `NaN produced on node layers ${ai.range[0]}-${ai.range[1] - 1}` : `NaN produced on worker layers ${ai.range[0]}–${ai.range[1] - 1}` });
-      }
-      teleNote("one", performance.now() - t0, 1);
-      if (!node) computePass(1, performance.now() - t0);
-      const msg = { pos: d.pos, ...packWire(h, ai.next === "host" ? null : tk) };
-      if (ai.next === "host") sendHidden(ai.hostId, { t: "ai-hiddenret", ...msg });
-      else sendHidden(ai.next, { t: "ai-hidden", ...msg, ...ctl });
-      if (!node) keepWarm(d.pos);
-      if (!node && d.pos % 8 === 0) aiStatus(`serving layers ${ai.range[0]}–${ai.range[1] - 1} — pos ${d.pos}`);
+      if (node) onWorkerFrame(performance.now() - t0);
+    } finally {
+      if (onTiming) timing("worker", d, { queueMs: receivedAt == null ? null : startedAt - receivedAt,
+        serviceMs: forwardedAt == null ? null : forwardedAt - startedAt, engineMs,
+        status: forwardedAt == null ? "incomplete" : "forwarded" });
     }
-    if (node) onWorkerFrame(performance.now() - t0);
   }
   function handleFrame(from, d) {
     if ((d.t === "ai-hiddenret" || d.t === "ai-hiddenret-b") &&
@@ -468,14 +519,19 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
       case "ai-hidden-b":
       case "ai-hidden":
         if (ai.role !== "worker") break;
+        const receivedAt = onTiming ? performance.now() : null;
         onFrame(d);
-        ai.q = ai.q.then(() => workerFrame(d)).catch((err) => {
+        ai.q = ai.q.then(() => workerFrame(d, receivedAt)).catch((err) => {
           onError(err);
           sendTo(ai.hostId, { t: "ai-error", message: err.message });
         });
         break;
-      case "ai-hiddenret-b": lapDone("b" + d.basePos, unpackWire(d)); break;
-      case "ai-hiddenret": lapDone(d.pos, unpackWire(d)); break;
+      case "ai-hiddenret-b":
+        if (onTiming) timing("return", d);
+        lapDone("b" + d.basePos, unpackWire(d)); break;
+      case "ai-hiddenret":
+        if (onTiming) timing("return", d);
+        lapDone(d.pos, unpackWire(d)); break;
       default: return false;
     }
     return true;
@@ -483,5 +539,5 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
 
   return { lapWait, lapDone, failWaiters, sendChain, resetState, ckptEngine, ckptClear, ckptSave, ckptResume,
     ckptPersist, ckptRestore, ckptPrune, ckptRejoin, aiPipeToken, aiPrefill, noteLap,
-    fillDrafts, workerFrame, handleFrame };
+    fillDrafts, workerFrame, handleFrame, noteOperation: onTiming ? noteOperation : null, noteGeneration: onTiming ? noteGeneration : null };
 }

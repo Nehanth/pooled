@@ -1,0 +1,1790 @@
+[
+  {
+    "run": "2026-10-12T07-30-43.774Z-R-plain-on-client-resources-series",
+    "configuration": "R",
+    "layers": {
+      "R": "0\u201327"
+    },
+    "mode": "plain",
+    "prompt": "hello",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 56.3935560000009,
+      "min": 45.03203200000007,
+      "max": 72.65670200000022
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 58.524941357716116,
+      "min": 51.850196217475215,
+      "max": 71.11757275894851
+    },
+    "speculativeRequests": 0,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [],
+    "inputHashes": [
+      "8fd6fbb2704e9e424caee906626236c5b9efb17660fb5f6525feeeea08abaa1b"
+    ],
+    "outputHashes": [
+      "b196c1508eab07e5e8594b5db9683b07ad3d9a6e97b83178d9e726bde9df88c7"
+    ]
+  },
+  {
+    "run": "2026-10-12T07-30-43.774Z-R-plain-on-client-resources-series",
+    "configuration": "R",
+    "layers": {
+      "R": "0\u201327"
+    },
+    "mode": "plain",
+    "prompt": "meaning",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 59.37392499999987,
+      "min": 54.47102200000518,
+      "max": 99.40367799999876
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 52.64985675385231,
+      "min": 50.88617439917369,
+      "max": 61.97043825954292
+    },
+    "speculativeRequests": 0,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [],
+    "inputHashes": [
+      "b62317a24b04f33a2877a589b4daa6dfacfd8951318655d43524abe8eeda9fe4"
+    ],
+    "outputHashes": [
+      "db3750450b4635f3dff40615e820516d28c81ee162f8a02d42ee91e056f42b2f"
+    ]
+  },
+  {
+    "run": "2026-10-12T07-30-43.774Z-R-plain-on-client-resources-series",
+    "configuration": "R",
+    "layers": {
+      "R": "0\u201327"
+    },
+    "mode": "plain",
+    "prompt": "japan",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 494.2841660000122,
+      "min": 466.5904210000008,
+      "max": 529.8983189999999
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 52.62199412289084,
+      "min": 48.146007637786354,
+      "max": 60.97491869583701
+    },
+    "speculativeRequests": 0,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [],
+    "inputHashes": [
+      "6e8f6a1b80b314225a3d7a497f9167db859c0fcacc4cf48910bdad03a50760aa"
+    ],
+    "outputHashes": [
+      "c385d989c4211c8456afdea55ce2e4458ca8481b02a085ccc6f6c807a199673f"
+    ]
+  },
+  {
+    "run": "2026-10-12T07-35-00.419Z-R-defaults-on-client-resources-series",
+    "configuration": "R",
+    "layers": {
+      "R": "0\u201327"
+    },
+    "mode": "defaults",
+    "prompt": "hello",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "creative",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 47.40830399999959,
+      "min": 41.19886200000019,
+      "max": 61.74064300000009
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 66.21741593262014,
+      "min": 56.858254611468666,
+      "max": 77.35366191694008
+    },
+    "speculativeRequests": 0,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [],
+    "inputHashes": [
+      "8fd6fbb2704e9e424caee906626236c5b9efb17660fb5f6525feeeea08abaa1b"
+    ],
+    "outputHashes": [
+      "b196c1508eab07e5e8594b5db9683b07ad3d9a6e97b83178d9e726bde9df88c7",
+      "3b202f9652a42ccb27a0e0f2e8c0a2001deef806215c543e7d8fa38411def478"
+    ]
+  },
+  {
+    "run": "2026-10-12T07-35-00.419Z-R-defaults-on-client-resources-series",
+    "configuration": "R",
+    "layers": {
+      "R": "0\u201327"
+    },
+    "mode": "defaults",
+    "prompt": "meaning",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "creative",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 93.46964799999841,
+      "min": 56.481830000004265,
+      "max": 111.53614399999788
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 56.579407244589284,
+      "min": 52.452980802922866,
+      "max": 59.57892220444081
+    },
+    "speculativeRequests": 0,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [],
+    "inputHashes": [
+      "b62317a24b04f33a2877a589b4daa6dfacfd8951318655d43524abe8eeda9fe4"
+    ],
+    "outputHashes": [
+      "eb07b4e381a19fc1627a786d85fecde570f2bfcd6272e46c497e79542de7883a",
+      "fbe8bf29d5e1c4e403440dadd7ed20273454251c9664abe5cf909b42f1a230ab",
+      "6d8972f45a83c33da53a488bbd13bd6f73bfcf6e6b92337150ff4142278612ae",
+      "fdc199261e6f00db807537ff5e4128aba0aa45c179dc7a13e9e705143c789922",
+      "f8987479b7b44e6160dcf527745126ddc03f59b71b6a5cc9c19970f0aac1fc24"
+    ]
+  },
+  {
+    "run": "2026-10-12T07-35-00.419Z-R-defaults-on-client-resources-series",
+    "configuration": "R",
+    "layers": {
+      "R": "0\u201327"
+    },
+    "mode": "defaults",
+    "prompt": "japan",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "creative",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 453.31267900000967,
+      "min": 366.2285520000005,
+      "max": 478.82327700000315
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 53.87002891210934,
+      "min": 50.42247631242579,
+      "max": 60.43311041629883
+    },
+    "speculativeRequests": 0,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [],
+    "inputHashes": [
+      "6e8f6a1b80b314225a3d7a497f9167db859c0fcacc4cf48910bdad03a50760aa"
+    ],
+    "outputHashes": [
+      "686e775f22a9156e945b0d38b035c1b8817e63aa596fe4962332563fe59f75b4",
+      "0ec1c99810b0a45bf48ebdd4611e8685978e9911d14bde424af0bccc9c252435",
+      "3c08c92f7a4c8be9562ca9476bf755877f068790df01984c219f46a03bbd1e99",
+      "f0ac7ad95146fe78bacca5f1bcbf3c5b26d85914e79139465bc80be4b4bcf3b6",
+      "a9964f328820ef3332e07543a7ea2ee5d9a14d7abca68165293aabc0d2824d28"
+    ]
+  },
+  {
+    "run": "2026-10-12T06-52-35.309Z-G1-plain-client-resources-series",
+    "configuration": "G1",
+    "layers": {
+      "G1": [
+        0,
+        28
+      ]
+    },
+    "mode": "plain",
+    "prompt": "hello",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 85.96240800000032,
+      "min": 85.17741500000011,
+      "max": 86.29357100000016
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 47.03816171251499,
+      "min": 23.572031606294583,
+      "max": 48.72351575441994
+    },
+    "speculativeRequests": 0,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [],
+    "inputHashes": [
+      "8fd6fbb2704e9e424caee906626236c5b9efb17660fb5f6525feeeea08abaa1b"
+    ],
+    "outputHashes": [
+      "b196c1508eab07e5e8594b5db9683b07ad3d9a6e97b83178d9e726bde9df88c7"
+    ]
+  },
+  {
+    "run": "2026-10-12T06-52-35.309Z-G1-plain-client-resources-series",
+    "configuration": "G1",
+    "layers": {
+      "G1": [
+        0,
+        28
+      ]
+    },
+    "mode": "plain",
+    "prompt": "meaning",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 123.25301700000273,
+      "min": 122.68965899999966,
+      "max": 123.78675100000146
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 43.120014395851314,
+      "min": 43.02281076683585,
+      "max": 43.14855326698294
+    },
+    "speculativeRequests": 0,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [],
+    "inputHashes": [
+      "b62317a24b04f33a2877a589b4daa6dfacfd8951318655d43524abe8eeda9fe4"
+    ],
+    "outputHashes": [
+      "db3750450b4635f3dff40615e820516d28c81ee162f8a02d42ee91e056f42b2f"
+    ]
+  },
+  {
+    "run": "2026-10-12T06-52-35.309Z-G1-plain-client-resources-series",
+    "configuration": "G1",
+    "layers": {
+      "G1": [
+        0,
+        28
+      ]
+    },
+    "mode": "plain",
+    "prompt": "japan",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 1112.1083450000006,
+      "min": 958.4084750000038,
+      "max": 1135.8125889999937
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 41.9399673162024,
+      "min": 41.81132394483383,
+      "max": 42.01750874454576
+    },
+    "speculativeRequests": 0,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [],
+    "inputHashes": [
+      "6e8f6a1b80b314225a3d7a497f9167db859c0fcacc4cf48910bdad03a50760aa"
+    ],
+    "outputHashes": [
+      "c385d989c4211c8456afdea55ce2e4458ca8481b02a085ccc6f6c807a199673f"
+    ]
+  },
+  {
+    "run": "2026-10-12T06-55-08.965Z-G1-defaults-client-resources-series",
+    "configuration": "G1",
+    "layers": {
+      "G1": [
+        0,
+        28
+      ]
+    },
+    "mode": "defaults",
+    "prompt": "hello",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 86.214563,
+      "min": 85.55347800000004,
+      "max": 86.456594
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 47.363100132394976,
+      "min": 23.73760914012652,
+      "max": 48.22332910408307
+    },
+    "speculativeRequests": 0,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [],
+    "inputHashes": [
+      "8fd6fbb2704e9e424caee906626236c5b9efb17660fb5f6525feeeea08abaa1b"
+    ],
+    "outputHashes": [
+      "b196c1508eab07e5e8594b5db9683b07ad3d9a6e97b83178d9e726bde9df88c7"
+    ]
+  },
+  {
+    "run": "2026-10-12T06-55-08.965Z-G1-defaults-client-resources-series",
+    "configuration": "G1",
+    "layers": {
+      "G1": [
+        0,
+        28
+      ]
+    },
+    "mode": "defaults",
+    "prompt": "meaning",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 124.00712500000009,
+      "min": 122.81245499999932,
+      "max": 277.735709999999
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 43.02215728503088,
+      "min": 42.19067040038082,
+      "max": 43.087502441526595
+    },
+    "speculativeRequests": 0,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [],
+    "inputHashes": [
+      "b62317a24b04f33a2877a589b4daa6dfacfd8951318655d43524abe8eeda9fe4"
+    ],
+    "outputHashes": [
+      "db3750450b4635f3dff40615e820516d28c81ee162f8a02d42ee91e056f42b2f"
+    ]
+  },
+  {
+    "run": "2026-10-12T06-55-08.965Z-G1-defaults-client-resources-series",
+    "configuration": "G1",
+    "layers": {
+      "G1": [
+        0,
+        28
+      ]
+    },
+    "mode": "defaults",
+    "prompt": "japan",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 963.0422039999976,
+      "min": 960.3058569999994,
+      "max": 1085.273543000003
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 41.22161093224895,
+      "min": 40.93675448055866,
+      "max": 41.80817486511436
+    },
+    "speculativeRequests": 0,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [],
+    "inputHashes": [
+      "6e8f6a1b80b314225a3d7a497f9167db859c0fcacc4cf48910bdad03a50760aa"
+    ],
+    "outputHashes": [
+      "c385d989c4211c8456afdea55ce2e4458ca8481b02a085ccc6f6c807a199673f"
+    ]
+  },
+  {
+    "run": "2026-10-14T02-17-58.054Z-G2-plain-client-resources-series",
+    "configuration": "G2",
+    "layers": {
+      "G2": [
+        0,
+        28
+      ]
+    },
+    "mode": "plain",
+    "prompt": "hello",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 88.12694299999976,
+      "min": 86.428044,
+      "max": 89.32915000000003
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 45.118484524246995,
+      "min": 44.06687048886895,
+      "max": 45.28968215941096
+    },
+    "speculativeRequests": 0,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [],
+    "inputHashes": [
+      "8fd6fbb2704e9e424caee906626236c5b9efb17660fb5f6525feeeea08abaa1b"
+    ],
+    "outputHashes": [
+      "b196c1508eab07e5e8594b5db9683b07ad3d9a6e97b83178d9e726bde9df88c7"
+    ]
+  },
+  {
+    "run": "2026-10-14T02-17-58.054Z-G2-plain-client-resources-series",
+    "configuration": "G2",
+    "layers": {
+      "G2": [
+        0,
+        28
+      ]
+    },
+    "mode": "plain",
+    "prompt": "meaning",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 120.40547800000058,
+      "min": 119.44367900000361,
+      "max": 125.25347599999986
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 43.44219404005321,
+      "min": 43.232169271690644,
+      "max": 44.29784864011982
+    },
+    "speculativeRequests": 0,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [],
+    "inputHashes": [
+      "b62317a24b04f33a2877a589b4daa6dfacfd8951318655d43524abe8eeda9fe4"
+    ],
+    "outputHashes": [
+      "db3750450b4635f3dff40615e820516d28c81ee162f8a02d42ee91e056f42b2f"
+    ]
+  },
+  {
+    "run": "2026-10-14T02-17-58.054Z-G2-plain-client-resources-series",
+    "configuration": "G2",
+    "layers": {
+      "G2": [
+        0,
+        28
+      ]
+    },
+    "mode": "plain",
+    "prompt": "japan",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 1046.1626620000025,
+      "min": 931.839439000003,
+      "max": 1062.8144030000112
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 42.38549329530972,
+      "min": 42.12165941247937,
+      "max": 43.07161627713907
+    },
+    "speculativeRequests": 0,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [],
+    "inputHashes": [
+      "6e8f6a1b80b314225a3d7a497f9167db859c0fcacc4cf48910bdad03a50760aa"
+    ],
+    "outputHashes": [
+      "c385d989c4211c8456afdea55ce2e4458ca8481b02a085ccc6f6c807a199673f"
+    ]
+  },
+  {
+    "run": "2026-10-14T02-21-01.568Z-G2-defaults-client-resources-series",
+    "configuration": "G2",
+    "layers": {
+      "G2": [
+        0,
+        28
+      ]
+    },
+    "mode": "defaults",
+    "prompt": "hello",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 88.57483900000011,
+      "min": 87.59838300000001,
+      "max": 94.47789200000011
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 44.8279501480201,
+      "min": 42.916794258296,
+      "max": 45.04600805564971
+    },
+    "speculativeRequests": 0,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [],
+    "inputHashes": [
+      "8fd6fbb2704e9e424caee906626236c5b9efb17660fb5f6525feeeea08abaa1b"
+    ],
+    "outputHashes": [
+      "b196c1508eab07e5e8594b5db9683b07ad3d9a6e97b83178d9e726bde9df88c7"
+    ]
+  },
+  {
+    "run": "2026-10-14T02-21-01.568Z-G2-defaults-client-resources-series",
+    "configuration": "G2",
+    "layers": {
+      "G2": [
+        0,
+        28
+      ]
+    },
+    "mode": "defaults",
+    "prompt": "meaning",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 121.01542100000006,
+      "min": 120.70730999999796,
+      "max": 122.94534900000144
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 43.29224433258324,
+      "min": 42.64983152724366,
+      "max": 43.426704210275076
+    },
+    "speculativeRequests": 0,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [],
+    "inputHashes": [
+      "b62317a24b04f33a2877a589b4daa6dfacfd8951318655d43524abe8eeda9fe4"
+    ],
+    "outputHashes": [
+      "db3750450b4635f3dff40615e820516d28c81ee162f8a02d42ee91e056f42b2f"
+    ]
+  },
+  {
+    "run": "2026-10-14T02-21-01.568Z-G2-defaults-client-resources-series",
+    "configuration": "G2",
+    "layers": {
+      "G2": [
+        0,
+        28
+      ]
+    },
+    "mode": "defaults",
+    "prompt": "japan",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 941.0516309999948,
+      "min": 934.1657220000052,
+      "max": 1075.9690780000092
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 42.15333309968835,
+      "min": 41.62967778502318,
+      "max": 42.29697904881607
+    },
+    "speculativeRequests": 0,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [],
+    "inputHashes": [
+      "6e8f6a1b80b314225a3d7a497f9167db859c0fcacc4cf48910bdad03a50760aa"
+    ],
+    "outputHashes": [
+      "c385d989c4211c8456afdea55ce2e4458ca8481b02a085ccc6f6c807a199673f"
+    ]
+  },
+  {
+    "run": "2026-10-14T02-31-47.150Z-G1G2-plain-memory-client-resources-series",
+    "configuration": "G1+G2",
+    "layers": {
+      "G1": [
+        0,
+        13
+      ],
+      "G2": [
+        13,
+        28
+      ]
+    },
+    "mode": "plain",
+    "prompt": "hello",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 143.71087799999987,
+      "min": 138.68171399999937,
+      "max": 280.9702240000006
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 28.892784438808576,
+      "min": 27.684938643116308,
+      "max": 30.887289497678182
+    },
+    "speculativeRequests": 0,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [],
+    "inputHashes": [
+      "8fd6fbb2704e9e424caee906626236c5b9efb17660fb5f6525feeeea08abaa1b"
+    ],
+    "outputHashes": [
+      "b196c1508eab07e5e8594b5db9683b07ad3d9a6e97b83178d9e726bde9df88c7"
+    ]
+  },
+  {
+    "run": "2026-10-14T02-31-47.150Z-G1G2-plain-memory-client-resources-series",
+    "configuration": "G1+G2",
+    "layers": {
+      "G1": [
+        0,
+        13
+      ],
+      "G2": [
+        13,
+        28
+      ]
+    },
+    "mode": "plain",
+    "prompt": "meaning",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 281.162135999999,
+      "min": 207.45752100000027,
+      "max": 297.244163000003
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 23.67055745555988,
+      "min": 21.505822224627973,
+      "max": 24.78752217529241
+    },
+    "speculativeRequests": 0,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [],
+    "inputHashes": [
+      "b62317a24b04f33a2877a589b4daa6dfacfd8951318655d43524abe8eeda9fe4"
+    ],
+    "outputHashes": [
+      "db3750450b4635f3dff40615e820516d28c81ee162f8a02d42ee91e056f42b2f"
+    ]
+  },
+  {
+    "run": "2026-10-14T02-31-47.150Z-G1G2-plain-memory-client-resources-series",
+    "configuration": "G1+G2",
+    "layers": {
+      "G1": [
+        0,
+        13
+      ],
+      "G2": [
+        13,
+        28
+      ]
+    },
+    "mode": "plain",
+    "prompt": "japan",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 879.9180199999973,
+      "min": 770.5970959999831,
+      "max": 966.336553000001
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 27.6926620289677,
+      "min": 26.085538430347427,
+      "max": 28.15556011970909
+    },
+    "speculativeRequests": 0,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [],
+    "inputHashes": [
+      "6e8f6a1b80b314225a3d7a497f9167db859c0fcacc4cf48910bdad03a50760aa"
+    ],
+    "outputHashes": [
+      "c385d989c4211c8456afdea55ce2e4458ca8481b02a085ccc6f6c807a199673f"
+    ]
+  },
+  {
+    "run": "2026-10-14T02-39-29.398Z-G1G2-defaults-memory-client-resources-series",
+    "configuration": "G1+G2",
+    "layers": {
+      "G1": [
+        0,
+        13
+      ],
+      "G2": [
+        13,
+        28
+      ]
+    },
+    "mode": "defaults",
+    "prompt": "hello",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 199.50399900000048,
+      "min": 193.34845300000052,
+      "max": 319.84130600000026
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 23.585900273341736,
+      "min": 22.59998692997555,
+      "max": 24.180206314757093
+    },
+    "speculativeRequests": 0,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [],
+    "inputHashes": [
+      "8fd6fbb2704e9e424caee906626236c5b9efb17660fb5f6525feeeea08abaa1b"
+    ],
+    "outputHashes": [
+      "b196c1508eab07e5e8594b5db9683b07ad3d9a6e97b83178d9e726bde9df88c7"
+    ]
+  },
+  {
+    "run": "2026-10-14T02-39-29.398Z-G1G2-defaults-memory-client-resources-series",
+    "configuration": "G1+G2",
+    "layers": {
+      "G1": [
+        0,
+        13
+      ],
+      "G2": [
+        13,
+        28
+      ]
+    },
+    "mode": "defaults",
+    "prompt": "meaning",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 261.99708600000304,
+      "min": 226.43278600000485,
+      "max": 347.3053099999961
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 23.566818886086672,
+      "min": 22.767882625583553,
+      "max": 25.60142720890953
+    },
+    "speculativeRequests": 5,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [],
+    "inputHashes": [
+      "b62317a24b04f33a2877a589b4daa6dfacfd8951318655d43524abe8eeda9fe4"
+    ],
+    "outputHashes": [
+      "db3750450b4635f3dff40615e820516d28c81ee162f8a02d42ee91e056f42b2f"
+    ]
+  },
+  {
+    "run": "2026-10-14T02-39-29.398Z-G1G2-defaults-memory-client-resources-series",
+    "configuration": "G1+G2",
+    "layers": {
+      "G1": [
+        0,
+        13
+      ],
+      "G2": [
+        13,
+        28
+      ]
+    },
+    "mode": "defaults",
+    "prompt": "japan",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 828.6292890000041,
+      "min": 757.2690619999921,
+      "max": 868.7547989999875
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 28.645745791765208,
+      "min": 28.364698645060148,
+      "max": 29.54145577321244
+    },
+    "speculativeRequests": 5,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [],
+    "inputHashes": [
+      "6e8f6a1b80b314225a3d7a497f9167db859c0fcacc4cf48910bdad03a50760aa"
+    ],
+    "outputHashes": [
+      "c385d989c4211c8456afdea55ce2e4458ca8481b02a085ccc6f6c807a199673f"
+    ]
+  },
+  {
+    "run": "2026-10-12T06-59-59.859Z-RG1-plain-memory-client-resources-series",
+    "configuration": "R+G1",
+    "layers": {
+      "R": "0\u201317",
+      "G1": "18\u201327"
+    },
+    "mode": "plain",
+    "prompt": "hello",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 115.18013400000018,
+      "min": 105.24146899999869,
+      "max": 194.211276
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 35.81391914199075,
+      "min": 22.572047017140516,
+      "max": 36.369699390905154
+    },
+    "speculativeRequests": 0,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [],
+    "inputHashes": [
+      "8fd6fbb2704e9e424caee906626236c5b9efb17660fb5f6525feeeea08abaa1b"
+    ],
+    "outputHashes": [
+      "b196c1508eab07e5e8594b5db9683b07ad3d9a6e97b83178d9e726bde9df88c7"
+    ]
+  },
+  {
+    "run": "2026-10-12T06-59-59.859Z-RG1-plain-memory-client-resources-series",
+    "configuration": "R+G1",
+    "layers": {
+      "R": "0\u201317",
+      "G1": "18\u201327"
+    },
+    "mode": "plain",
+    "prompt": "meaning",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 233.38244500000292,
+      "min": 174.86439699999755,
+      "max": 367.0147100000031
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 28.096361442157264,
+      "min": 26.597478085642383,
+      "max": 30.03070999562394
+    },
+    "speculativeRequests": 0,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [],
+    "inputHashes": [
+      "b62317a24b04f33a2877a589b4daa6dfacfd8951318655d43524abe8eeda9fe4"
+    ],
+    "outputHashes": [
+      "db3750450b4635f3dff40615e820516d28c81ee162f8a02d42ee91e056f42b2f"
+    ]
+  },
+  {
+    "run": "2026-10-12T06-59-59.859Z-RG1-plain-memory-client-resources-series",
+    "configuration": "R+G1",
+    "layers": {
+      "R": "0\u201317",
+      "G1": "18\u201327"
+    },
+    "mode": "plain",
+    "prompt": "japan",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 654.4952909999993,
+      "min": 620.9736489999923,
+      "max": 690.2825719999964
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 29.682304265025287,
+      "min": 28.47787847756878,
+      "max": 30.719790786860752
+    },
+    "speculativeRequests": 0,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [],
+    "inputHashes": [
+      "6e8f6a1b80b314225a3d7a497f9167db859c0fcacc4cf48910bdad03a50760aa"
+    ],
+    "outputHashes": [
+      "c385d989c4211c8456afdea55ce2e4458ca8481b02a085ccc6f6c807a199673f"
+    ]
+  },
+  {
+    "run": "2026-10-12T07-24-39.913Z-RG1-defaults-memory-client-resources-series",
+    "configuration": "R+G1",
+    "layers": {
+      "R": "0\u201317",
+      "G1": "18\u201327"
+    },
+    "mode": "defaults",
+    "prompt": "hello",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "creative",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 205.7641819999999,
+      "min": 132.92855500000042,
+      "max": 224.5577720000001
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 23.58688912861291,
+      "min": 21.74532515792321,
+      "max": 30.456209160964626
+    },
+    "speculativeRequests": 0,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [],
+    "inputHashes": [
+      "8fd6fbb2704e9e424caee906626236c5b9efb17660fb5f6525feeeea08abaa1b"
+    ],
+    "outputHashes": [
+      "b196c1508eab07e5e8594b5db9683b07ad3d9a6e97b83178d9e726bde9df88c7"
+    ]
+  },
+  {
+    "run": "2026-10-12T07-24-39.913Z-RG1-defaults-memory-client-resources-series",
+    "configuration": "R+G1",
+    "layers": {
+      "R": "0\u201317",
+      "G1": "18\u201327"
+    },
+    "mode": "defaults",
+    "prompt": "meaning",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "creative",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 304.6151019999961,
+      "min": 296.70094500000414,
+      "max": 397.78209799999604
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 26.86400011733763,
+      "min": 25.85563966609271,
+      "max": 27.232113642797273
+    },
+    "speculativeRequests": 5,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [],
+    "inputHashes": [
+      "b62317a24b04f33a2877a589b4daa6dfacfd8951318655d43524abe8eeda9fe4"
+    ],
+    "outputHashes": [
+      "2f34110afa46f5e9273e1dbb7982b44af2f14451456405c2549869ff23db35b8",
+      "7c005ef3b967db2e439e2293e1bce908d2da7c998ced400746769f5fc606e689",
+      "13761465008072299f1b71789a817763beebd086fe88971326a4ff673b89bbe9",
+      "eae93554dc140843f7a899cfbcfd79b716b83748b8d667ea6a2dc82452cc2cca",
+      "bf612c158800a0f729dff51b39bca5f05649554cf13957a146770fc7af850d59"
+    ]
+  },
+  {
+    "run": "2026-10-12T07-24-39.913Z-RG1-defaults-memory-client-resources-series",
+    "configuration": "R+G1",
+    "layers": {
+      "R": "0\u201317",
+      "G1": "18\u201327"
+    },
+    "mode": "defaults",
+    "prompt": "japan",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "creative",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 756.3768500000006,
+      "min": 728.8282809999946,
+      "max": 785.4990079999843
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 26.92592301494196,
+      "min": 25.406736288418788,
+      "max": 28.216124847667782
+    },
+    "speculativeRequests": 5,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [],
+    "inputHashes": [
+      "6e8f6a1b80b314225a3d7a497f9167db859c0fcacc4cf48910bdad03a50760aa"
+    ],
+    "outputHashes": [
+      "c00ad9f15aafffbc673cdb057e348b2a598f3f4a2a9e69d3322a999cba823844",
+      "fc60db6a03231efb89aaea7e16ab16eb84309e27ffdefc9e9854427ac256f616",
+      "8a938f4b77464fded6f24d7d8de114361ad18dd6b37aa889733ee1c621af6de1",
+      "c625f3bd22dabb88c7d25beb5177f7cfc29c012c54031fd1486d8dede6097dfc",
+      "2e18e67e6f5d3ae1448afbd5ebeb57f9a5a6f82f8624f49b5a3919a89ed7ba18"
+    ]
+  },
+  {
+    "run": "2026-10-14T03-10-45.817Z-G1S-plain-controlled-memory-client-resources-series",
+    "configuration": "G1+S",
+    "layers": {
+      "G1": [
+        0,
+        23
+      ],
+      "S": [
+        23,
+        28
+      ]
+    },
+    "mode": "plain",
+    "prompt": "hello",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 465.7407380000004,
+      "min": 458.0241109999997,
+      "max": 491.8979870000003
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 9.730256193393444,
+      "min": 9.66705091260635,
+      "max": 10.91963153808679
+    },
+    "speculativeRequests": 0,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [
+      0
+    ],
+    "inputHashes": [
+      "8fd6fbb2704e9e424caee906626236c5b9efb17660fb5f6525feeeea08abaa1b"
+    ],
+    "outputHashes": [
+      "b196c1508eab07e5e8594b5db9683b07ad3d9a6e97b83178d9e726bde9df88c7"
+    ]
+  },
+  {
+    "run": "2026-10-14T03-10-45.817Z-G1S-plain-controlled-memory-client-resources-series",
+    "configuration": "G1+S",
+    "layers": {
+      "G1": [
+        0,
+        23
+      ],
+      "S": [
+        23,
+        28
+      ]
+    },
+    "mode": "plain",
+    "prompt": "meaning",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 719.3331400000025,
+      "min": 684.8897540000034,
+      "max": 730.5960619999969
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 9.045945217915186,
+      "min": 8.594130576967808,
+      "max": 9.071211316606078
+    },
+    "speculativeRequests": 0,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [
+      0
+    ],
+    "inputHashes": [
+      "b62317a24b04f33a2877a589b4daa6dfacfd8951318655d43524abe8eeda9fe4"
+    ],
+    "outputHashes": [
+      "db3750450b4635f3dff40615e820516d28c81ee162f8a02d42ee91e056f42b2f"
+    ]
+  },
+  {
+    "run": "2026-10-14T03-10-45.817Z-G1S-plain-controlled-memory-client-resources-series",
+    "configuration": "G1+S",
+    "layers": {
+      "G1": [
+        0,
+        23
+      ],
+      "S": [
+        23,
+        28
+      ]
+    },
+    "mode": "plain",
+    "prompt": "japan",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 3394.7501130000455,
+      "min": 3349.438146999979,
+      "max": 3446.9394489999977
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 8.853299991326878,
+      "min": 8.789357355988852,
+      "max": 8.921235498896516
+    },
+    "speculativeRequests": 0,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [
+      0
+    ],
+    "inputHashes": [
+      "6e8f6a1b80b314225a3d7a497f9167db859c0fcacc4cf48910bdad03a50760aa"
+    ],
+    "outputHashes": [
+      "c385d989c4211c8456afdea55ce2e4458ca8481b02a085ccc6f6c807a199673f"
+    ]
+  },
+  {
+    "run": "2026-10-14T03-22-42.308Z-G1S-defaults-controlled-memory-client-resources-series",
+    "configuration": "G1+S",
+    "layers": {
+      "G1": [
+        0,
+        23
+      ],
+      "S": [
+        23,
+        28
+      ]
+    },
+    "mode": "defaults",
+    "prompt": "hello",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 478.94293800000014,
+      "min": 457.1158429999996,
+      "max": 527.7178029999995
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 9.500592581886197,
+      "min": 9.204969643814284,
+      "max": 10.800230659662189
+    },
+    "speculativeRequests": 0,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [
+      0
+    ],
+    "inputHashes": [
+      "8fd6fbb2704e9e424caee906626236c5b9efb17660fb5f6525feeeea08abaa1b"
+    ],
+    "outputHashes": [
+      "b196c1508eab07e5e8594b5db9683b07ad3d9a6e97b83178d9e726bde9df88c7"
+    ]
+  },
+  {
+    "run": "2026-10-14T03-22-42.308Z-G1S-defaults-controlled-memory-client-resources-series",
+    "configuration": "G1+S",
+    "layers": {
+      "G1": [
+        0,
+        23
+      ],
+      "S": [
+        23,
+        28
+      ]
+    },
+    "mode": "defaults",
+    "prompt": "meaning",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 689.4374139999854,
+      "min": 663.7168649999949,
+      "max": 717.4553129999986
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 9.199658196793964,
+      "min": 8.79803724379856,
+      "max": 9.389723035859378
+    },
+    "speculativeRequests": 5,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [
+      0
+    ],
+    "inputHashes": [
+      "b62317a24b04f33a2877a589b4daa6dfacfd8951318655d43524abe8eeda9fe4"
+    ],
+    "outputHashes": [
+      "db3750450b4635f3dff40615e820516d28c81ee162f8a02d42ee91e056f42b2f"
+    ]
+  },
+  {
+    "run": "2026-10-14T03-22-42.308Z-G1S-defaults-controlled-memory-client-resources-series",
+    "configuration": "G1+S",
+    "layers": {
+      "G1": [
+        0,
+        23
+      ],
+      "S": [
+        23,
+        28
+      ]
+    },
+    "mode": "defaults",
+    "prompt": "japan",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 4204.015653999988,
+      "min": 3363.375594000041,
+      "max": 5162.4287189999595
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 7.812683979437491,
+      "min": 7.328897855782392,
+      "max": 9.65006402857753
+    },
+    "speculativeRequests": 5,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [
+      0,
+      1
+    ],
+    "inputHashes": [
+      "6e8f6a1b80b314225a3d7a497f9167db859c0fcacc4cf48910bdad03a50760aa"
+    ],
+    "outputHashes": [
+      "c385d989c4211c8456afdea55ce2e4458ca8481b02a085ccc6f6c807a199673f"
+    ]
+  },
+  {
+    "run": "2026-10-14T03-59-28.935Z-G1G2S-plain-controlled-memory-client-resources-series",
+    "configuration": "G1+S+G2",
+    "layers": {
+      "G1": [
+        0,
+        10
+      ],
+      "S": [
+        10,
+        15
+      ],
+      "G2": [
+        15,
+        28
+      ]
+    },
+    "mode": "plain",
+    "prompt": "hello",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 476.3498010000003,
+      "min": 453.32174900000064,
+      "max": 498.6182180000005
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 10.275253311016197,
+      "min": 9.542946348574617,
+      "max": 11.005665475562733
+    },
+    "speculativeRequests": 0,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [
+      0
+    ],
+    "inputHashes": [
+      "8fd6fbb2704e9e424caee906626236c5b9efb17660fb5f6525feeeea08abaa1b"
+    ],
+    "outputHashes": [
+      "b196c1508eab07e5e8594b5db9683b07ad3d9a6e97b83178d9e726bde9df88c7"
+    ]
+  },
+  {
+    "run": "2026-10-14T03-59-28.935Z-G1G2S-plain-controlled-memory-client-resources-series",
+    "configuration": "G1+S+G2",
+    "layers": {
+      "G1": [
+        0,
+        10
+      ],
+      "S": [
+        10,
+        15
+      ],
+      "G2": [
+        15,
+        28
+      ]
+    },
+    "mode": "plain",
+    "prompt": "meaning",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 998.8116880000016,
+      "min": 900.8523120000027,
+      "max": 1076.3774700000067
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 4.609298332635254,
+      "min": 4.591117466504578,
+      "max": 4.757826496635418
+    },
+    "speculativeRequests": 0,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [
+      0
+    ],
+    "inputHashes": [
+      "b62317a24b04f33a2877a589b4daa6dfacfd8951318655d43524abe8eeda9fe4"
+    ],
+    "outputHashes": [
+      "db3750450b4635f3dff40615e820516d28c81ee162f8a02d42ee91e056f42b2f"
+    ]
+  },
+  {
+    "run": "2026-10-14T03-59-28.935Z-G1G2S-plain-controlled-memory-client-resources-series",
+    "configuration": "G1+S+G2",
+    "layers": {
+      "G1": [
+        0,
+        10
+      ],
+      "S": [
+        10,
+        15
+      ],
+      "G2": [
+        15,
+        28
+      ]
+    },
+    "mode": "plain",
+    "prompt": "japan",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 3490.6273459999356,
+      "min": 3441.2165549999336,
+      "max": 3689.266644999967
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 4.488982453915488,
+      "min": 4.457510063037517,
+      "max": 4.633499701277242
+    },
+    "speculativeRequests": 0,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [
+      0
+    ],
+    "inputHashes": [
+      "6e8f6a1b80b314225a3d7a497f9167db859c0fcacc4cf48910bdad03a50760aa"
+    ],
+    "outputHashes": [
+      "c385d989c4211c8456afdea55ce2e4458ca8481b02a085ccc6f6c807a199673f"
+    ]
+  },
+  {
+    "run": "2026-10-14T04-19-18.316Z-G1G2S-defaults-controlled-memory-client-resources-series",
+    "configuration": "G1+S+G2",
+    "layers": {
+      "G1": [
+        0,
+        10
+      ],
+      "S": [
+        10,
+        15
+      ],
+      "G2": [
+        15,
+        28
+      ]
+    },
+    "mode": "defaults",
+    "prompt": "hello",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 492.8057660000013,
+      "min": 490.3938079999989,
+      "max": 523.6187820000014
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 9.157452451745906,
+      "min": 9.034111386238946,
+      "max": 10.214284963316896
+    },
+    "speculativeRequests": 0,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [
+      0
+    ],
+    "inputHashes": [
+      "8fd6fbb2704e9e424caee906626236c5b9efb17660fb5f6525feeeea08abaa1b"
+    ],
+    "outputHashes": [
+      "b196c1508eab07e5e8594b5db9683b07ad3d9a6e97b83178d9e726bde9df88c7"
+    ]
+  },
+  {
+    "run": "2026-10-14T04-19-18.316Z-G1G2S-defaults-controlled-memory-client-resources-series",
+    "configuration": "G1+S+G2",
+    "layers": {
+      "G1": [
+        0,
+        10
+      ],
+      "S": [
+        10,
+        15
+      ],
+      "G2": [
+        15,
+        28
+      ]
+    },
+    "mode": "defaults",
+    "prompt": "meaning",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 785.0554199999897,
+      "min": 665.3369010000024,
+      "max": 800.9953570000071
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 7.874947166098714,
+      "min": 6.142115006145063,
+      "max": 8.150081042535863
+    },
+    "speculativeRequests": 5,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [
+      0
+    ],
+    "inputHashes": [
+      "b62317a24b04f33a2877a589b4daa6dfacfd8951318655d43524abe8eeda9fe4"
+    ],
+    "outputHashes": [
+      "db3750450b4635f3dff40615e820516d28c81ee162f8a02d42ee91e056f42b2f"
+    ]
+  },
+  {
+    "run": "2026-10-14T04-19-18.316Z-G1G2S-defaults-controlled-memory-client-resources-series",
+    "configuration": "G1+S+G2",
+    "layers": {
+      "G1": [
+        0,
+        10
+      ],
+      "S": [
+        10,
+        15
+      ],
+      "G2": [
+        15,
+        28
+      ]
+    },
+    "mode": "defaults",
+    "prompt": "japan",
+    "source": {
+      "commit": "307344d18ace9e1bd621f32aed5d932ebf7658b9",
+      "treeSha256": "0c7640431bc7b510948c90bb524625586249ef953da46612f5c98ba8e3714ed1"
+    },
+    "sampling": "exact",
+    "context": 16384,
+    "n": 5,
+    "clientTTFTms": {
+      "n": 5,
+      "median": 5446.294574999949,
+      "min": 3374.4526110000443,
+      "max": 5491.578096000012
+    },
+    "clientDeliveryTps": {
+      "n": 5,
+      "median": 6.555587274681514,
+      "min": 5.859644000391927,
+      "max": 7.862966770683264
+    },
+    "speculativeRequests": 5,
+    "resourceSampling": true,
+    "phoneThermalStatuses": [
+      0
+    ],
+    "inputHashes": [
+      "6e8f6a1b80b314225a3d7a497f9167db859c0fcacc4cf48910bdad03a50760aa"
+    ],
+    "outputHashes": [
+      "c385d989c4211c8456afdea55ce2e4458ca8481b02a085ccc6f6c807a199673f"
+    ]
+  }
+]

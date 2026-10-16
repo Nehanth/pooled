@@ -46,7 +46,7 @@ import * as env from "./env.js";
 import { openModel } from "./source.js";
 import { loadShard } from "./shard.js";
 import { makeLink, attachWire, holdWire, wireReady, sendFrame, PROTOCOL, DROP_ALL } from "../../room/transport.js";
-import { unpackWire, wireStats } from "../../room/wire.js";
+import { wireStats } from "../../room/wire.js";
 import { TeleMeter, expertStoreOf } from "../../room/tele.js";
 import { isPhoneMeta, roomFit, dealRoom, shortNote, specWithOffload, dealOffloads, parseForce, layersTotal } from "../../room/plan.js";
 import { verifyHost, hostAllowed, startBusy, startFrom, joinOrder, START_PENDING_MS } from "../../room/authz.js";
@@ -128,7 +128,7 @@ export class RoomNode extends EventEmitter {
   constructor({ name, pledgeGB, signal = null, modelDir, flags = "", stripes = 4, log = null, selfTest = true, chatMaxNew = MAX_NEW, ctx = 0,
     gbps = null, autoRedeal = true, ckpt = {}, ckptDisk, visibility = "all", allowApi = true, setup = {}, expectHost = null, key = null, pass = null, beforeLoad = null, split = "memory",
     legacyAuth = process.env.POOLED_LEGACY_AUTH !== "0", legacySend = process.env.POOLED_LEGACY_AUTH === "1",
-    ramGB = 0, mem = null, expertDisk = false, offloadSpec = parseForce(process.env.POOLED_OFFLOAD_SPEC), relay = null } = {}) {
+    ramGB = 0, mem = null, expertDisk = false, offloadSpec = parseForce(process.env.POOLED_OFFLOAD_SPEC), relay = null, onTiming = null } = {}) {
     super();
     // offloadSpec: speculative decoding while the deal has a device offloading experts (room/plan.js
     // specWithOffload): null = off there, on otherwise (the default); true / false = always on / off with offload.
@@ -196,6 +196,7 @@ export class RoomNode extends EventEmitter {
     // shard.js loadShard, for this device's layers (tests stub it, and e2e.mjs slows it down)
     this.loadShardFn = loadShard;
     this.log = log || ((s) => this.emit("log", s));
+    this.onTiming = onTiming;
     this.peer = null; this.isHost = false; this.code = null; this.meta = null;
     this.conns = new Map();    // peer id -> { conn, name, meta, link, stripes, seen, missed, rtt }
     this.roster = new Map();   // host: id -> { name, meta }
@@ -219,7 +220,7 @@ export class RoomNode extends EventEmitter {
     this.pipeline = createPipeline({
       state: this.ai, options: { profile: "node" },
       transport: { sendHidden: (id, msg) => this.sendHidden(id, msg), sendTo: (id, msg) => this.sendTo(id, msg), chainRtt: () => this.chainRtt() },
-      hooks: { wakeChain: (pos) => this.wakeChain(pos), prefillFrame: () => process.env.POOLED_PREFILL_FRAME,
+      hooks: { onTiming, wakeChain: (pos) => this.wakeChain(pos), prefillFrame: () => process.env.POOLED_PREFILL_FRAME,
         teleNote: (kind, ms, n) => this.teleNote(kind, ms, n),
         onWorkerFrame: (ms) => { this.frames = (this.frames || 0) + 1; this.frameMs = (this.frameMs || 0) + ms; } },
     });
@@ -757,10 +758,12 @@ export class RoomNode extends EventEmitter {
         this.log(String(d.why || "the host changed this device's share"));
         return;
       case "ai-wake": return;   // a phone's GPU wake hint; a computer's GPU does not clock down between laps
-      case "ai-hidden": case "ai-hidden-b":
+      case "ai-hidden": case "ai-hidden-b": {
         if (ai.role !== "worker") return;
-        ai.q = ai.q.then(() => this.workerFrame(d)).then(() => this.diskAfterFrame(d)).catch((err) => { this.log("frame failed: " + err.message); this.sendTo(ai.hostId, { t: "ai-error", message: err.message }); });
+        const receivedAt = this.onTiming ? performance.now() : null;
+        ai.q = ai.q.then(() => this.workerFrame(d, receivedAt)).then(() => this.diskAfterFrame(d)).catch((err) => { this.log("frame failed: " + err.message); this.sendTo(ai.hostId, { t: "ai-error", message: err.message }); });
         return;
+      }
       // the host pinned a prefix (its slot rides a frame's sv): this device's part goes to disk
       case "ai-ckpt-save": if (ai.role === "worker") this.diskSaveReq(d); return;
       // the room is back online after a restart: read the host's pinned prefixes back, where this device has them
@@ -812,8 +815,7 @@ export class RoomNode extends EventEmitter {
           if (d.load && ai.starting) ai.startErr?.(new Error(`${e?.name || from} couldn't load its layers (${d.message})`));
         }
         return;
-      case "ai-hiddenret": this.lapDone(d.pos, unpackWire(d)); return;
-      case "ai-hiddenret-b": this.lapDone("b" + d.basePos, unpackWire(d)); return;
+      case "ai-hiddenret": case "ai-hiddenret-b": this.pipeline.handleFrame(from, d); return;
       case "ai-tele": return;
       case "ai-ask":
         if (!this.hosting()) return;

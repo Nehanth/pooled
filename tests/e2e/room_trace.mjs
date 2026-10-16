@@ -47,14 +47,14 @@ export function patchPipeline(s) {
   // GPU sampling (exp/gpu-sample, --query gpusample=1): the same marks around the candidates head
   if (s.includes("      const c = await current.engine.headFromHiddenIds(h, desc);"))
     s = rep(s, "      const c = await current.engine.headFromHiddenIds(h, desc);", "      __HP('h.head0', 'ai-hidden', pos); const c = await current.engine.headFromHiddenIds(h, desc); __HP('h.head1', 'ai-hidden', pos);", f);
-  // host, returned frames
-  s = rep(s, "      case \"ai-hiddenret-b\": lapDone(\"b\" + d.basePos, unpackWire(d)); break;",
-    "      case \"ai-hiddenret-b\": { __HP('h.unp0', 'ai-hiddenret-b', d.basePos); const __u = unpackWire(d); __HP('h.unp1', 'ai-hiddenret-b', d.basePos); lapDone(\"b\" + d.basePos, __u); break; }", f);
-  s = rep(s, "      case \"ai-hiddenret\": lapDone(d.pos, unpackWire(d)); break;",
-    "      case \"ai-hiddenret\": { __HP('h.unp0', 'ai-hiddenret', d.pos); const __u = unpackWire(d); __HP('h.unp1', 'ai-hiddenret', d.pos); lapDone(d.pos, __u); break; }", f);
+  // host, returned frames (leave the optional pipeline observer in place)
+  s = rep(s, 'lapDone("b" + d.basePos, unpackWire(d)); break;',
+    '{ __HP("h.unp0", "ai-hiddenret-b", d.basePos); const __u = unpackWire(d); __HP("h.unp1", "ai-hiddenret-b", d.basePos); lapDone("b" + d.basePos, __u); break; }', f);
+  s = rep(s, 'lapDone(d.pos, unpackWire(d)); break;',
+    '{ __HP("h.unp0", "ai-hiddenret", d.pos); const __u = unpackWire(d); __HP("h.unp1", "ai-hiddenret", d.pos); lapDone(d.pos, __u); break; }', f);
   // worker
-  s = rep(s, "        ai.q = ai.q.then(() => workerFrame(d))", "        __HP('w.enq', d.t, d.t === 'ai-hidden' ? d.pos : d.basePos); ai.q = ai.q.then(() => workerFrame(d))", f);
-  s = rep(s, "    const t0 = performance.now();\n    if (d.t === \"ai-hidden-b\") {", "    const t0 = performance.now(); __HP('w.start', d.t, d.t === 'ai-hidden' ? d.pos : d.basePos, d.n || 1);\n    if (d.t === \"ai-hidden-b\") {", f);
+  s = rep(s, "        ai.q = ai.q.then(() => workerFrame(d, receivedAt))", "        __HP('w.enq', d.t, d.t === 'ai-hidden' ? d.pos : d.basePos); ai.q = ai.q.then(() => workerFrame(d, receivedAt))", f);
+  s = rep(s, "      const t0 = performance.now();\n      if (d.t === \"ai-hidden-b\") {", "      const t0 = performance.now(); __HP('w.start', d.t, d.t === 'ai-hidden' ? d.pos : d.basePos, d.n || 1);\n      if (d.t === \"ai-hidden-b\") {", f);
   s = rep(s, "      const { h: xs, ids: tk } = splitWire(d, nTok, wdim);", "      const { h: xs, ids: tk } = splitWire(d, nTok, wdim); __HP('w.unp1', d.t, d.basePos);", f);
   s = rep(s, "      teleNote(d.spec ? \"spec\" : \"pre\", performance.now() - t0, nTok);", "      __HP('w.gpu1', d.t, d.basePos); teleNote(d.spec ? \"spec\" : \"pre\", performance.now() - t0, nTok);", f);
   s = rep(s, "      const bmsg = { basePos: d.basePos, n: nTok, ...(d.spec ? { spec: 1 } : {}), ...packWire(hb, ai.next === \"host\" ? null : tk) };",

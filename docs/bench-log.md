@@ -2736,3 +2736,14 @@ both runs; run 2 is the cleaner one.
   3 and 0 ids against the golden, and ctx16k's answer names another note than all 3 llama.cpp runs: smoke tests only.
 - llama.cpp is not reproducible at these lengths: its 3 runs of each prompt part at steps 0-40 (ctx32k at step 0,
   "Note" vs "Item"). Our ids were identical in both runs.
+
+## Qwen3 1.7B heterogeneous room protocol (#21, October 2026)
+
+[Generation results and limitations](benchmarks/room-2026-10-14.md) cover RTX 3090,
+two GTX 1060 nodes and an S21 Ultra, using the standard prompts and five measured
+repeats per prompt/mode. Fourteen completed series have 210 measured requests.
+The [protocol](design/room-benchmarks.md) distinguishes host/client delivery,
+per-hop local durations, actual speculative activity and observer overhead.
+Results retain the tested base `307344d` and patch fingerprint; they are not a
+before/after speedup or hardware validation of the later rebased contribution.
+Remaining RTX configurations are deferred while the device is used for training.
