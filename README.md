@@ -67,7 +67,7 @@ It is **experimental**:
 
 Demo video: [Qwen3.8 Flash in a Chrome tab on a Mac Studio, then an RTX 5070 PC joins](https://pooled.run/docs/media/flash-demo.mp4) (recorded October 13, 2026, 2:13, subtitles; the room gets 1.4x faster when the PC joins).
 
-Pick it in the room's model picker. To lend a computer from the command line, run the CLI from this repo for now, not from npm: [cli/README.md](cli/README.md#qwen38-flash-experimental-run-the-cli-from-the-repo).
+Pick it in the room's model picker. To lend a computer from the command line: `npx @pooled/cli join <ROOM CODE>` ([cli/README.md](cli/README.md#qwen38-flash-experimental-from-the-terminal)).
 
 Details: [docs/architecture.md](docs/architecture.md), [docs/kernels.md](docs/kernels.md), [docs/protocol.md](docs/protocol.md), [docs/models.md](docs/models.md).
 
