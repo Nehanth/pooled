@@ -62,7 +62,7 @@ Qwen3.8 Flash is a 125B mixture-of-experts model that uses about 6B of its param
 
 Reading from disk is the slow part. Every device that joins holds part of the model in its own memory, so less comes from disk and the room gets faster. A Mac Studio running it alone in a Chrome tab decodes about 8 tokens/s; with an RTX 5070 PC joined, about 10-12 tokens/s, depending on the network between them.
 
-It is **experimental**. Context goes up to 64K tokens (the picker offers 8K, 32K and 64K), tested against llama.cpp; 128K is in progress. To lend or host it from the terminal, run the CLI from the repo for now: the CLI on npm doesn't have Flash's newest code yet (see the [CLI README](https://github.com/Nehanth/pooled/blob/main/cli/README.md#qwen38-flash-experimental-run-the-cli-from-the-repo)).
+It is **experimental**. Context goes up to 64K tokens (the picker offers 8K, 32K and 64K), tested against llama.cpp; 128K is in progress. To lend or host it from the terminal, use `@pooled/cli` 2.0.0 or newer: `npx @pooled/cli join <ROOM CODE>` (see the [CLI README](https://github.com/Nehanth/pooled/blob/main/cli/README.md#qwen38-flash-experimental-from-the-terminal)).
 
 :::tip
 Only give memory the device really has free. On a Mac, the GPU shares memory with everything else that is open.
