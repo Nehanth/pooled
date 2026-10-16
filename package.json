@@ -1,6 +1,6 @@
 {
   "name": "pooled",
-  "version": "2.0.1",
+  "version": "2.0.0",
   "description": "Peer-to-peer LLM inference in the browser: each device holds some of the layers, tabs talk over WebRTC, and our own WebGPU kernels do the math.",
   "homepage": "https://pooled.run",
   "repository": {
