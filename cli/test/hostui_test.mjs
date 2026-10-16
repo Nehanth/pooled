@@ -58,9 +58,10 @@ test("Qwen3.8-Flash-Next: pooled host's fit and need are the planner's per-layer
   // its need: every layer's own cost at the context plus the host's part, rounded up to a tenth as the room page's NEED_GB
   assert.equal(modelNeedGB(lib, F), Math.ceil((rb.layerCost.total + rb.hostBytes) / 2 ** 30 * 10 - 1e-9) / 10);
   assert.equal(modelNeedGB(lib, F), NEED_GB[F]);
-  // two Sparks lending 34 GB each: short by the exact sums' gap (the host's 24 layers hold layers 0-5, the heavy ones)
+  // two Sparks lending 34 GB each: short at every context of the ladder, so short by the exact sums' gap at its shortest
+  // (2048: what the room is short for, room/models.js pickCtx; the host's 24 layers hold layers 0-5, the heavy ones)
   const two = roomFitNow(lib, { model: F, devices: [dev("spark", 34, { ngram: true }), dev("spark2", 34, { ngram: true })], spareGB: [0, 0] });
-  const fit = roomFit(48, [34 * 2 ** 30, 34 * 2 ** 30], rb.layerCost, rb.hostBytes);
+  const rb2 = roomBytes(F, 2048, "f16"), fit = roomFit(48, [34 * 2 ** 30, 34 * 2 ** 30], rb2.layerCost, rb2.hostBytes);
   assert.equal(two.fits, fit.fits);
   assert.equal(two.fits, false);
   assert.equal(two.shortGB, gbUp(shortBy(fit, [0, 0])));

@@ -35,11 +35,11 @@
 // fresh PROFILE takes ~96 GB of disk for the copy (check df -h first; delete test profiles after).
 // env: MODELS (~/llm/models: <MODELS>/q38flash/<the three files>), WEIGHTS_URL (fetch the files from there instead),
 //      CASES (default two-sum,bash,eos-mid), TAB_GB, TAB_RAM
-//      (the tab's ?tabram=, 3), NODE_GB (8), NODE_RAM (24), NODE_DISK (1), OFFLOAD_DISCRETE (1: the node counts as a
+//      (the tab's ?tabram=, 4: the site's default, room/flashdisk.js TAB_RAM_GB), NODE_GB (8), NODE_RAM (24), NODE_DISK (1), OFFLOAD_DISCRETE (1: the node counts as a
 //      discrete GPU on the GB10's unified memory), PROFILE (Chrome profile with the OPFS copy; default
 //      ~/.cache/pooled-flashtab-profile), CHROME_BIN (default Playwright's Chromium), HEADLESS (1), MAXNEW (cap per
 //      case, default the golden's length), PORT (8261), OUT (result JSON), SPLIT (memory), QUERY (extra page params),
-//      TABDISK (allow | no | seed), CKPT (the page's ?ckpt=: 0 here, 2 in mode ckpt), CKPT_N (16)
+//      TABDISK (allow | no | seed), CKPT (the page's ?ckpt=: 0 here, 2 in mode ckpt), CKPT_N (16), TURNS / TURN_N / CTX_SWITCH / SWITCH_CASES (demo: a two-turn chat, a context change; see turnsAndSwitch)
 import http from "node:http";
 import https from "node:https";
 import fs from "node:fs";
@@ -47,6 +47,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, execSync } from "node:child_process";
 import { joinRoom } from "../index.js";
+import { judgeGolden } from "../../../tests/q38flash_rule.js";
 
 const MODE = process.argv[2] || "tab";
 const ROOT = path.resolve(new URL("../../..", import.meta.url).pathname);
@@ -56,9 +57,10 @@ const env = (k, d) => process.env[k] ?? d;
 const PORT = +env("PORT", 8261), SIG = PORT + 2, SIGNAL_HOST = env("SIGNAL_HOST", ""), SIGNAL = `${SIGNAL_HOST || "127.0.0.1"}:${SIG}`;
 const MODELS = path.resolve(env("MODELS", path.join(os.homedir(), "llm/models")));
 const FLASH_DIR = fs.existsSync(path.join(MODELS, "q38flash")) ? path.join(MODELS, "q38flash") : MODELS;
-const TAB_GB = +env("TAB_GB", MODE === "resident" ? 90 : 12), TAB_RAM = env("TAB_RAM", "3");
+const TAB_GB = +env("TAB_GB", MODE === "resident" ? 90 : 12), TAB_RAM = env("TAB_RAM", "4");
 const PROFILE = env("PROFILE", path.join(os.homedir(), ".cache", "pooled-flashtab-profile"));
 const TABDISK = env("TABDISK", "allow"), CKPT = env("CKPT", MODE === "ckpt" ? "2" : "0");
+const TRACE = env("TRACE", "") === "1";
 const ORIGIN = env("ORIGIN", "").replace(/\/$/, "");   // serve the page from here under that origin (demo)
 const T0 = Date.now();
 const log = (...a) => console.error(((Date.now() - T0) / 1000).toFixed(1) + "s", ...a);
@@ -133,7 +135,7 @@ async function openTab() {
   page = ctx.pages()[0] || await ctx.newPage();
   page.on("crash", () => log("tab CRASHED"));
   page.on("pageerror", (e) => log("tab pageerror:", String(e).slice(0, 300)));
-  page.on("console", (m) => { const t = m.text(); if (m.type() === "error" || /expert|OPFS|n-gram|offload|ingest|disk tier/i.test(t)) log("tab:", t.slice(0, 400)); });
+  page.on("console", (m) => { const t = m.text(); if (m.type() === "error" || TRACE || /expert|OPFS|n-gram|offload|ingest|disk tier/i.test(t)) log("tab:", t.slice(0, 400)); });
   const q = `peerweights=0&dev=1&ckpt=${CKPT}&split=${env("SPLIT", "memory")}&ask=0&tabram=${TAB_RAM}${env("QUERY", "") ? "&" + env("QUERY", "") : ""}`;
   await page.goto(ORIGIN ? `${ORIGIN}/room?${q}` : `http://127.0.0.1:${PORT}/p2p.html?signal=${SIGNAL}&${q}`);
   await page.waitForFunction(() => document.getElementById("join-gb").value !== "", null, { timeout: 60000 });
@@ -188,6 +190,11 @@ try {
     return { s: (Date.now() - t0) / 1000, st };
   };
   await page.selectOption("#ai-model", "qwen3.8-flash");
+  // the GPU's limits (a long context's K / V must fit maxStorageBufferBindingSize) and what the picker offers here
+  out.limits = await page.evaluate(async () => { const a = await navigator.gpu?.requestAdapter(); return a && { maxStorageBufferBindingSize: a.limits.maxStorageBufferBindingSize, maxBufferSize: a.limits.maxBufferSize }; });
+  await page.waitForTimeout(1500);
+  out.picker = await page.evaluate(() => [...document.querySelectorAll("#ai-ctx button[data-c]")].map((b) => b.title));
+  log("limits", JSON.stringify(out.limits), "· picker:", out.picker.join(" | "));
   let served0 = served;
   await page.click("#ai-start");
   const on1 = await waitOnline("start");
@@ -213,7 +220,15 @@ try {
     log(`re-dealt in ${out.redealS.toFixed(0)} s; the tab fetched ${out.netGiB.redeal} GiB from the model files (alone: ${out.netGiB.alone} GiB)`);
   }
   const fx = (v, d = 2) => (Number.isFinite(v) ? +v.toFixed(d) : null);
-  const gen = async (ids, n) => { const r = await page.evaluate(([ids, n]) => window.__pooledGen(ids, n), [ids, n]); log(`raw ${JSON.stringify({ ...r, tokens: r.tokens?.length, summary: undefined, laps: r.laps?.length, tele: r.tele?.length })}`); return r; };
+  // TRACE=1: the tab's whole console, and its status line every 15 s while a prompt runs (where a stuck one stopped)
+  const gen = async (ids, n) => {
+    let lastS = "";
+    const poll = TRACE ? setInterval(async () => { try { const s = (await tabStatus()).status; if (s !== lastS) { lastS = s; log("gen status:", s.slice(0, 200)); } } catch {} }, 15000) : null;
+    let r;
+    try { r = await page.evaluate(([ids, n]) => window.__pooledGen(ids, n), [ids, n]); } finally { clearInterval(poll); }
+    log(`raw ${JSON.stringify({ ...r, tokens: r.tokens?.length, summary: undefined, laps: r.laps?.length, tele: r.tele?.length })}`);
+    return r;
+  };
   const med = (a) => { const b = a.filter(Number.isFinite).sort((x, y) => x - y); return b.length ? +b[b.length >> 1].toFixed(1) : null; };
   // the golden CASES (REPS times each), each answer's verdict, speed and where its time went, into bag
   const runCases = async (bag, tag = "", cases = CASES) => {
@@ -226,8 +241,12 @@ try {
       const ids = r.tokens;
       let diff = ids.findIndex((x, i) => i < n && x !== g.ids[i]);
       if (diff < 0 && ids.length < n) diff = ids.length;
-      const ties = (g.nearTies || []).map((x) => x[0]), tieOk = diff >= 0 && ties.some((i) => i <= diff);
+      // a difference passes at an earlier listed near tie (the answers part there), or by the golden rule at that step
+      // (tests/q38flash_rule.js: our token within 0.5 nats of llama.cpp's top in any of its runs, our own gap under 0.5)
+      const ties = (g.nearTies || []).map((x) => x[0]), judged = diff >= 0 ? judgeGolden(g, ids, r.gaps, n) : null;
+      const tieOk = diff >= 0 && (ties.some((i) => i <= diff) || !!judged?.excused);
       const verdict = diff < 0 ? "MATCH" : tieOk ? "TIE" : "MISMATCH";
+      if (judged) log(`  ${name}: ${judged.msg}`);
       if (verdict === "MISMATCH") fail++;
       const e = r.experts, hit = e && e.lookups ? e.hits / e.lookups : null;
       const c = bag[key] = { verdict, n, diff, bits: r.bits, tps: fx(r.tps), prefillS: fx(r.tPre / 1000, 1), wallS: +((Date.now() - t) / 1000).toFixed(1), prompt: g.prompt.length,
@@ -254,6 +273,41 @@ try {
     }
   };
   let fail = 0;
+  // TURNS=<case>: a two-turn chat past the case's length (the demo, pooled): turn 1 is the case's prompt and TURN_N ids,
+  // turn 2 its whole chat plus the next golden id (a follow-up) and TURN_N more; both turns' ids must be the golden's
+  // (with ?ckpt= on, turn 2 restores turn 1's end state and reads one token). CTX_SWITCH=<ctx>: then the host changes
+  // the context in Room settings (#ai-ctx-set, its confirm accepted): the model loads again on every device; then
+  // SWITCH_CASES run at the new context.
+  const turnsAndSwitch = async () => {
+    const tc = env("TURNS", "");
+    if (tc) {
+      const g = gold[tc], N = +env("TURN_N", 16);
+      const r1 = await gen(g.prompt, N), r2 = await gen([...g.prompt, ...r1.tokens, g.ids[N]], N);
+      const both = [...r1.tokens, g.ids[N], ...r2.tokens], want = g.ids.slice(0, both.length);
+      const diff = both.findIndex((x, i) => x !== want[i]);
+      const ties = (g.nearTies || []).map((x) => x[0]), judged = diff >= 0 ? judgeGolden(g, both, [...(r1.gaps || []), null, ...(r2.gaps || [])], both.length) : null;
+      const verdict = diff < 0 && both.length === 2 * N + 1 ? "MATCH" : diff >= 0 && (ties.some((i) => i <= diff) || judged?.excused) ? "TIE" : "MISMATCH";
+      if (judged) log(`  turns: ${judged.msg}`);
+      if (verdict === "MISMATCH") fail++;
+      out.turns = { case: tc, verdict, diff, n: both.length, prompt1: g.prompt.length, prompt2: g.prompt.length + N + 1, reused2: r2.reused,
+        prefill1S: fx(r1.tPre / 1000, 1), prefill2S: fx(r2.tPre / 1000, 1), tps1: fx(r1.tps), tps2: fx(r2.tps), bits: [r1.bits, r2.bits] };
+      log(`turns ${tc}: ${verdict}${diff >= 0 ? ` at ${diff}` : ""} · turn 1 ${g.prompt.length} tok in ${out.turns.prefill1S} s · turn 2 (${out.turns.prompt2} tok, reused ${r2.reused}) in ${out.turns.prefill2S} s`);
+    }
+    const sw = +env("CTX_SWITCH", 0);
+    if (sw && String(sw) === await page.evaluate(() => document.getElementById("ai-ctx-set").value)) log(`CTX_SWITCH: the room already runs at ${sw}; no switch`);
+    else if (sw) {
+      page.once("dialog", (d) => { log("confirm:", d.message()); d.accept(); });
+      const from = await page.evaluate(() => document.getElementById("ai-ctx-set").value);
+      const tS = Date.now();
+      await page.evaluate((v) => { const s = document.getElementById("ai-ctx-set"); s.value = String(v); s.dispatchEvent(new Event("change")); }, sw);
+      await page.waitForFunction(() => !document.getElementById("ai-panel").classList.contains("online"), null, { timeout: 60000 });
+      const on3 = await waitOnline("context switch");
+      out.ctxSwitch = { from: +from, to: sw, s: (Date.now() - tS) / 1000, st: on3.st, now: await page.evaluate(() => document.getElementById("ai-ctx-set").value) };
+      log(`context ${from} -> ${sw} in ${out.ctxSwitch.s.toFixed(1)} s (setting now ${out.ctxSwitch.now})`);
+      out.switched = {};
+      await runCases(out.switched, "switched", env("SWITCH_CASES", "two-sum").split(","));
+    }
+  };
   if (MODE === "ckpt") {
     // A, B, C (see the header): C restores A's end state with checkpoints on
     const N = +env("CKPT_N", 16), A = gold["two-sum"], B = gold.bash;
@@ -268,7 +322,7 @@ try {
     if (verdict !== "MATCH") fail++;
     out.cases.ckpt = { verdict, ckpt: CKPT, n: both.length, diff, reusedC: rc.reused, bitsA: ra.bits, bitsB: rb.bits, bitsC: rc.bits, prefillC: fx(rc.tPre / 1000, 1), tps: fx(rc.tps) };
     log(`ckpt=${CKPT}: A+C ${verdict}${diff >= 0 ? ` at ${diff}` : ""} · C reused ${rc.reused} of ${A.prompt.length + N + 1} prompt ids · bits A ${ra.bits} B ${rb.bits} C ${rc.bits} · C's prefill ${fx(rc.tPre / 1000, 1)} s`);
-  } else if (MODE !== "demo") await runCases(out.cases);
+  } else if (MODE !== "demo") { await runCases(out.cases); await turnsAndSwitch(); }
   else {
     // the demo: alone, then a device from another machine joins, the re-deal, then pooled
     out.alone = {};
@@ -291,6 +345,7 @@ try {
     log(`re-dealt in ${out.redealS.toFixed(1)} s`);
     out.pooled = {};
     await runCases(out.pooled, "pooled");
+    await turnsAndSwitch();
     const med = (a) => { const b = a.filter(Number.isFinite).sort((x, y) => x - y); return b.length ? b[b.length >> 1] : null; };
     out.summary = Object.fromEntries(["alone", "pooled"].map((k) => [k, { tps: Object.values(out[k]).map((c) => c.tps), median: med(Object.values(out[k]).map((c) => c.tps)) }]));
     log("summary " + JSON.stringify(out.summary) + ` · re-deal ${out.redealS.toFixed(1)} s`);

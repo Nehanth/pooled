@@ -2,7 +2,7 @@
 // picks for the room (ai-load.flash), a worker's reading of it, what its ai-ready reports (ctx, fsig) and the host's
 // check of that, and the planner's QSA constant against the engine's own accounting (engine/qwen4exp_mem.js).
 // No GPU.   deno test --allow-read tests/unit/flash_room_format_test.js
-import { flashLongMeta, flashRoomFormat, flashLoadOpts, flashReadyFields, readyCtxShort, flashQsaIn, roomBytes, SHAPE,
+import { flashRoomLimits, pickCtx, flashLongMeta, flashRoomFormat, flashLoadOpts, flashReadyFields, readyCtxShort, flashQsaIn, roomBytes, SHAPE,
   FLASH_QSA_RING, FLASH_QSA_LAYER_BYTES, flashLayerCost } from "../../room/models.js";
 import { qwen4expMemory, QSA_RAW_RING } from "../../engine/qwen4exp_mem.js";
 
@@ -12,7 +12,8 @@ const throws = (f, re, m) => { try { f(); } catch (e) { if (re && !re.test(e.mes
 const F = "qwen3.8-flash";
 
 Deno.test("flash format: meta.flashLong says the longest context one f32 K / V buffer binds, at most QSA's", () => {
-  eq(flashLongMeta(128), { ctx: 65536, kv: ["f32"], batch: 1 });
+  // ctx: one f32 K / V buffer's context, ctx16 the f16 one's (rooms long-context PR 5: f16 in rooms)
+  eq(flashLongMeta(128), { ctx: 65536, ctx16: 131072, kv: ["f32", "f16"], batch: 1 });
   eq(flashLongMeta(128, { batch: false }).batch, 0, "a node with POOLED_FLASH_BATCH=0");
   eq(flashLongMeta(512).ctx, 262144);
   eq(flashLongMeta(1e9).ctx, 411000, "QSA_MAX_SEQ");
@@ -21,8 +22,11 @@ Deno.test("flash format: meta.flashLong says the longest context one f32 K / V b
 
 Deno.test("flash format: QSA only when every dealt device loads it; one format for the room", () => {
   const nw = { flashLong: flashLongMeta(128) }, old = { webgpu: true };
-  eq(flashRoomFormat(F, [nw, nw]), { qsa: 1, kv: "f32", ring: FLASH_QSA_RING });
-  eq(flashRoomFormat(F, [nw]), { qsa: 1, kv: "f32", ring: 1024 }, "solo");
+  eq(flashRoomFormat(F, [nw, nw]), { qsa: 1, kv: "f16", ring: FLASH_QSA_RING });
+  eq(flashRoomFormat(F, [nw]), { qsa: 1, kv: "f16", ring: 1024 }, "solo");
+  // a device that loads QSA in f32 only (a build from before f16 in rooms): the whole room in f32
+  const f32only = { flashLong: { ctx: 65536, kv: ["f32"], batch: 1 } };
+  eq(flashRoomFormat(F, [nw, f32only]), { qsa: 1, kv: "f32", ring: 1024 });
   eq(flashRoomFormat(F, [nw, old]), null, "an older worker: the dense engine everywhere");
   eq(flashRoomFormat(F, [old, nw]), null, "an older host device");
   eq(flashRoomFormat(F, [nw, undefined]), null, "a device whose meta is unknown");
@@ -34,13 +38,26 @@ Deno.test("flash format: QSA only when every dealt device loads it; one format f
   eq(FLASH_QSA_RING, QSA_RAW_RING, "the engine's default ring");
 });
 
+Deno.test("flash limits: the room's K / V format and the longest context every device takes", () => {
+  const big = { flashLong: flashLongMeta(4096) }, tab = { flashLong: flashLongMeta(128) }, f32only = { flashLong: { ctx: 65536, kv: ["f32"], batch: 1 } };
+  eq(flashRoomLimits(F, [big, tab]), { kv: "f16", cap: 131072 }, "f16: a 128 MiB binding holds 128K");
+  eq(flashRoomLimits(F, [big, big]), { kv: "f16", cap: 411000 }, "QSA's own cap");
+  eq(flashRoomLimits(F, [big, f32only]), { kv: "f32", cap: 65536 }, "an f32-only build: f32, and its f32 cap");
+  eq(flashRoomLimits(F, [big, { webgpu: true }]), { kv: "f32", cap: 2048 }, "an older build: dense at 2048");
+  eq(flashRoomLimits("qwen3.8-27b", [big]), { kv: null, cap: Infinity });
+  // pickCtx skips the ladder's steps over the cap
+  eq(pickCtx(F, { fitsAt: () => true, cap: 65536 }).ctx, 65536);
+  eq(pickCtx(F, { fitsAt: () => true, cap: 2048 }).ctx, 2048);
+});
+
 Deno.test("flash format: a worker's reading of ai-load.flash", () => {
   eq(flashLoadOpts(undefined), null, "an older host: dense");
   eq(flashLoadOpts(null), null);
   eq(flashLoadOpts({ qsa: 0 }), null);
   eq(flashLoadOpts({ qsa: 1, kv: "f32", ring: 1024 }), { kv: "f32", ring: 1024 });
   eq(flashLoadOpts({ qsa: 1 }), { kv: "f32", ring: 1024 }, "defaults");
-  throws(() => flashLoadOpts({ qsa: 1, kv: "f16" }), /f32 only/, "f16 is not loaded by this build yet");
+  eq(flashLoadOpts({ qsa: 1, kv: "f16", ring: 1024 }), { kv: "f16", ring: 1024 }, "f16 in rooms (PR 5 / 9)");
+  throws(() => flashLoadOpts({ qsa: 1, kv: "q8" }), /f32 or f16/, "a format this build does not load");
   for (const ring of [1000, 0, -1024, 32, 2 ** 20, "1024"]) throws(() => flashLoadOpts({ qsa: 1, ring }), /bad QSA ring/, String(ring));
 });
 
@@ -80,7 +97,7 @@ Deno.test("flash format: the planner's QSA bytes are the engine's QSA state at 2
   eq(FLASH_QSA_LAYER_BYTES * 12, (a.state - b.state) + 12 * 3277824, "ring + pooled keys + indexer, 12 QSA layers");
   // the planner's per-layer costs (roomBytes -> flashLayerCost) count QSA at 2048, since the rooms load it there
   const on = flashLayerCost(F, 2048, { qsa: true }), off = flashLayerCost(F, 2048, { qsa: false });
-  eq(roomBytes(F, 2048, "f16").layerCost.total, on.total, "roomBytes counts it for Flash");
+  eq(roomBytes(F, 2048, "f32").layerCost.total, on.total, "roomBytes counts it for Flash");
   ok(Math.abs(on.total - off.total - (FLASH_QSA_LAYER_BYTES * 12 + on.once)) < 1, "ring + pooled keys + indexer, 12 QSA layers, and the score scratch once");
   ok((on.total - off.total) / 48 < 2 ** 20, "under 1 MiB a layer");
   eq(roomBytes("qwen3.8-27b", 2048, "f16").layerBytes, SHAPE["qwen3.8-27b"].layer + 2048 * SHAPE["qwen3.8-27b"].kvPos.f16, "and only for Flash");

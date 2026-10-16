@@ -34,7 +34,9 @@ Deno.test("flash catalogue: dev-gated entry, pinned files, shape from the GGUF h
   // FILE_GB: what a device downloads for its share, so the files without the n-gram table (only its holder fetches it)
   eq(Math.round((F.bytes - S.ngram.bytes) / 1e8) / 10, FILE_GB[KEY], "FILE_GB is the files' size in GB without the table");
   // context: dense attention is exact to 2051 cells and the phase-1 engine refuses more
-  eq([CTX[KEY], maxSeqFor(KEY), maxSeqFor(KEY, 32768), kvModeFor(KEY, "q8")], [{ def: 2048, max: 2048 }, 2048, 2048, "f16"]);
+  // the longest proven context is the default and the cap; the ladder walks the proven lengths down (rooms long-context PR 5)
+  eq([CTX[KEY], maxSeqFor(KEY), maxSeqFor(KEY, 32768), kvModeFor(KEY, "q8")],
+    [{ def: 65536, max: 65536, ladder: [65536, 32768, 16384, 8192, 2048] }, 65536, 32768, "f16"]);
   // shape: 48 layers, 512 experts with layers 0-5's Q4_1 down experts parked as Q8, the 4-stream residual, the table
   eq([S.L, S.park.nExp, S.park.runs.map(([n]) => n), S.hDim, wireWidth(KEY), S.ngram, ngramOf(KEY)],
     [48, 512, [6, 42], 10240, 10240, { layer: 1, bytes: 28800138240 }, { layer: 1, bytes: 28800138240 }]);
@@ -53,7 +55,7 @@ Deno.test("flash catalogue: dev-gated entry, pinned files, shape from the GGUF h
   ok(rb.layerCost[1] > rb.layerCost[0] && rb.layerCost[0] > rb.layerCost[6], "layer 1 (PLE) and layers 0-5 are the heavy ones");
   // NEED_GB: the layers, embedding and head at the default context, rounded up to a tenth of a GiB (the table is disk,
   // not GPU memory)
-  const need = (48 * rb.layerBytes + rb.hostBytes) / GB;
+  const rbDef = roomBytes(KEY, CTX[KEY].def), need = (48 * rbDef.layerBytes + rbDef.hostBytes) / GB;
   ok(NEED_GB[KEY] >= need && NEED_GB[KEY] - need < 0.1, `NEED_GB ${NEED_GB[KEY]} vs ${need.toFixed(2)} GiB`);
 });
 
@@ -598,4 +600,14 @@ Deno.test("flash batch width: a QSA engine's passes stay under its raw-key ring 
   // the rooms' 1024-row ring: a pass completes blocks of up to cols + 3 rows, so solo runs 960 columns, rooms 256
   eq([flashBatchCols(true, 1024), flashBatchCols(false, 1024)], [960, 256]);
   ok(flashBatchCols(true, 1024) + 3 <= 1024 && flashBatchCols(false, 128) + 3 <= 128);
+});
+
+Deno.test("solo prefill: a 128K prompt's ids go into the fed list without spreading them as arguments", async () => {
+  const { pushAll } = await import("../../room/pipeline.js");
+  const ids = new Array(300000).fill(0).map((_, i) => i % 7), fed = [1];
+  let threw = false;
+  try { [].push(...ids); } catch { threw = true; }
+  ok(threw, "spreading 300K ids as arguments throws here (the bug a 128K solo prompt hit)");
+  pushAll(fed, ids, 0, ids.length - 1);
+  eq([fed.length, fed[1], fed.at(-1)], [300000, 0, ids[ids.length - 2]]);
 });

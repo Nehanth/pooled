@@ -49,7 +49,8 @@ export const pluginCtx = (key, ask = 0) => (ask > 0 ? maxSeqFor(key, ask) : CTX[
 // what the plugin asks the room node for: the context asked for, else none for a model with a fallback
 // context (the node opens the 1.7B at 16k, or at 8k when the room is short of memory for 16k:
 // room/models.js pickCtx), else the model's largest (pluginCtx)
-export const pluginAsk = (key, ask = 0) => (ask > 0 ? ask : CTX[key]?.fallback ? 0 : pluginCtx(key));
+// (and none for a model with a ladder, Qwen3.8 Flash: the node walks it down from its longest proven context)
+export const pluginAsk = (key, ask = 0) => (ask > 0 ? ask : CTX[key]?.fallback || CTX[key]?.ladder ? 0 : pluginCtx(key));
 
 // OpenClaw's own instructions and tools are about 12k tokens and it keeps 4k for the answer: a room
 // with a shorter context (`pooled host qwen3-1.7b` from @pooled/cli 0.3.0-0.3.1 opened at 8k) ends every
