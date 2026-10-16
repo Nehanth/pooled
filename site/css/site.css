@@ -244,6 +244,15 @@ html:not(.js) .card{display:none}
 .fig .more:empty{display:none}
 .rungs li.ok .more,.rungs li:not(.ok) .fig b,.rungs li:not(.ok) .nd{display:none}
 .rungs li.unlock{animation:unlock .7s var(--ease)}
+/* the disk row (Qwen3.8 Flash), as the room's picker draws it: "125B · runs from disk" in place of a GB figure, and an
+   experimental tag under the name; the size drops away beside "needs N GB more", and on a phone the chip says "from disk" */
+.rungs li.dk .rn{display:flex;flex-direction:column;gap:3px;line-height:1.1}
+.rungs li.dk .rnm{overflow:hidden;text-overflow:ellipsis}
+.rungs li .xp{font:500 9px/1 var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3)}
+.fig .dkc{font:400 var(--t-xs)/1 var(--mono);color:var(--ink-2);padding:4px 6px;border-radius:var(--r-xs);background:var(--bg-2);box-shadow:inset 0 0 0 1px var(--rule-2)}
+.rungs li:not(.ok) .dkz{display:none}
+@media (max-width:960px){.fig .dkz{display:none}}   /* a tablet's picker card is as narrow as a phone's */
+@media (max-width:480px){.fig .dkr{display:none}}
 @keyframes unlock{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--blue) 35%,transparent)}100%{box-shadow:0 0 0 10px transparent}}
 .cd-pick .mbtn{height:44px;box-shadow:0 1px 0 rgba(255,255,255,.18) inset,0 6px 16px -8px rgba(42,69,224,.7);transition:background .25s,opacity .3s,box-shadow .25s,transform .14s var(--ease)}
 .cd-pick .mbtn.off{background:var(--bg-3);color:var(--ink-4);box-shadow:none}

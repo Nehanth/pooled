@@ -123,7 +123,7 @@
 
   /* ---------- the room: what each device lends, and the layers each one gets ---------- */
   const LEND = [10, 12, 2];                      // GB: the laptop, the desktop, the friend's phone
-  const NEEDS = [4, 17, 22.5];                   // the three models in the picker
+  const NEEDS = [4, 17, 22.5];                   // the three models on the meter (the picker's fourth row, Qwen3.8 Flash, runs from disk: its data-need)
   const TOP = 24 * 1.06;                         // the meter's scale, as the room draws it
   const SEG_GB = [9.6, 11.2, 1.7];               // 40 layers of 22.5 GB, dealt 17 / 20 / 3 by memory
 
@@ -227,9 +227,9 @@
       b.classList.toggle("join", k === joining);
     });
     rungs.forEach((li, k) => {
-      const ok = sum >= NEEDS[k], was = li.classList.contains("ok");
+      const nd = NEEDS[k] ?? +li.dataset.need, ok = sum >= nd, was = li.classList.contains("ok");
       li.classList.toggle("ok", ok);
-      li.querySelector(".more").textContent = ok ? "" : `needs ${Math.round((NEEDS[k] - sum) * 10) / 10} GB more`;
+      li.querySelector(".more").textContent = ok ? "" : `needs ${Math.round((nd - sum) * 10) / 10} GB more`;
       if (ok && !was && animate && sum > 0 && !RM) restart(li, "unlock");
     });
     lendGB.textContent = lent[0];

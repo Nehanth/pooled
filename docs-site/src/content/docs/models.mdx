@@ -1,7 +1,7 @@
 ---
 title: Pick a model
 eyebrow: Getting started
-description: The three models in the room's picker, how much memory each needs across the room, and which one to pick for your devices.
+description: The models in the room's picker, how much memory each needs across the room, and which one to pick for your devices.
 sidebar:
   label: Pick a model
   order: 4
@@ -18,6 +18,9 @@ Sources (for the fact-checker):
 - room/pledge.js (phone caps)
 - --disk (roadmap/32 steps 3-5): room/plan.js roomFit (disk only when parking can't hold the model), DISK_RAM_MIN 2 GiB;
   35B on a 10 GB GPU with --ram 8: short with RAM alone, fits with --disk (tests/unit/offload_disk_plan_test.js)
+- Qwen3.8 Flash: README "Qwen3.8 Flash (experimental)" (125B / 6B active, speeds, 64K, 128K in progress, CLI from the repo); room/models.js
+  FLASH_CTX_PROVEN / FLASH_CTX_OPTIONS (8K/32K/64K picker, default 64K); README research section (17% of experts serve ~77% of lookups);
+  video public/media/flash-demo.mp4 (recorded 2026-10-13, 2:13, captions.srt: alone ~6 words/s, + PC ~9 words/s, 1.4x)
 */}
 
 Pick by how much memory the room has. The header shows it as `N GB pooled`, and the picker preselects the biggest model that fits.
@@ -27,6 +30,8 @@ Pick by how much memory the room has. The header shows it as `N GB pooled`, and 
 | Qwen3 1.7B | 5.6 GB (4 GB at 8K) | 1.83 GB | 16K (8K when the room is short) |
 | Qwen3.8 27B | 17 GB | 16.06 GB | 16K (up to 64K) |
 | Qwen3.6 35B MoE | 22.5 GB | 20.84 GB | 32K (up to 128K) |
+| Qwen3.5 122B MoE (preview: `?dev=1`, or the terminal) | 73 GB | 72.52 GB | 32K (up to 128K) |
+| Qwen3.8-Flash-Next (**experimental**; `POOLED_DEV=1` for `pooled host` / `list`) | 72 GB, or about 8 GB on one tab with its experts on disk | 100.6 GB (71.8 GB of layers, 28.8 GB n-gram table) | 64K (the picker offers 8K, 32K and 64K; 128K in progress) |
 
 The download is split across the devices that run the model, so each one fetches only its part.
 
@@ -42,9 +47,27 @@ The 1.7B opens with a 16K context when the room has 5.6 GB for it. With less, do
 
 In the terminal, `pooled host` and `pooled pull` also list the **Qwen3.5 122B MoE**: about 73 GB across the room and a 72.52 GB download. A Mac Studio lending 25 GB and an RTX 5070 PC keeping 42 GB of its experts in RAM run it at about 17 tok/s. The room page shows it only with `?dev=1`.
 
-When a room's GPUs and RAM together still fall short of a MoE model, a computer started with `--disk` can read some of its experts from the model's files on its SSD instead. The room does this only as a last resort, and it is slower. See [MoE experts read from disk](/docs/terminal#moe-experts-read-from-disk).
+When a room's GPUs and RAM together still fall short of a MoE model, a computer started with `--disk` can read some of its experts from the model's files on its SSD instead. The room does this only as a last resort, and it is slower. See [MoE experts read from disk](/docs/terminal#moe-experts-read-from-disk). A browser tab has its own disk tier for Qwen3.8 Flash (below).
 
 Phones add little memory: 0.5 to 2 GB each. See [Phones and tablets](/docs/phones).
+
+## Qwen3.8 Flash (experimental)
+
+<video controls preload="none" playsinline poster="/docs/media/flash-demo.jpg" style="width:100%;border-radius:12px;margin:1rem 0">
+  <source src="/docs/media/flash-demo.mp4" type="video/mp4" />
+</video>
+
+*Recorded October 13, 2026 (2:13, subtitles): Qwen3.8 Flash in a Chrome tab on a Mac Studio, then an RTX 5070 PC joins the room and it gets 1.4x faster.*
+
+Qwen3.8 Flash is a 125B mixture-of-experts model that uses about 6B of its parameters per token. It is far bigger than most GPUs' memory, so Pooled runs it from disk:
+
+- Each device keeps its share of the model's experts on its SSD: in the browser's storage (OPFS) for a tab, after you allow it, or in the model files for `pooled join`. A tab copies its share once, up to 92.4 GB.
+- Each device keeps the experts it used recently in a cache on its GPU. A small cache serves most lookups, because routing repeats: on recorded traces, about 17% of a layer's experts serve about 77% of lookups.
+- The rest are read from disk as a token needs them.
+
+Reading from disk is the slow part. Every device that joins holds part of the model in its own memory, so less comes from disk and the room gets faster. A Mac Studio running it alone in a Chrome tab decodes about 8 tokens/s; with an RTX 5070 PC joined, about 10-12 tokens/s, depending on the network between them.
+
+It is **experimental**. Context goes up to 64K tokens (the picker offers 8K, 32K and 64K), tested against llama.cpp; 128K is in progress. To lend or host it from the terminal, run the CLI from the repo for now: the CLI on npm doesn't have Flash's newest code yet (see the [CLI README](https://github.com/Nehanth/pooled/blob/main/cli/README.md#qwen38-flash-experimental-run-the-cli-from-the-repo)).
 
 :::tip
 Only give memory the device really has free. On a Mac, the GPU shares memory with everything else that is open.

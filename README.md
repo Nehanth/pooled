@@ -4,7 +4,7 @@
     <img src="site/logo/wordmark-light.svg" height="56" alt="pooled">
   </picture></a>
 </p>
-<p align="center"><b>Peer-to-peer LLM inference in the browser. Pool your devices to run big open models, for chat and coding agents.</b></p>
+<p align="center"><b>Peer-to-peer LLM inference in the browser. Pool your devices to run big open models, for chat and coding agents. Models bigger than your GPU run from your SSD.</b></p>
 <p align="center">
   <a href="https://pooled.run">Site</a> ·
   <a href="https://pooled.run/room">Start a room</a> ·
@@ -23,7 +23,7 @@ https://github.com/user-attachments/assets/5142d877-e4d5-4f6b-9b5e-0ef48dcb73f6
 
 <p align="center"><sub>Demo, recorded September 27, 2026 (2:29, with voice and subtitles): Qwen 3.6 35B MoE across a Mac and an iPhone in browser tabs. The phone chats with it, then Code mode builds a Tetris game, fixes its own bug and restyles it. <a href="https://github.com/Nehanth/pooled/releases/download/v1.0.0/pooled-demo-2026-09-27.mp4">Download</a> · <a href="https://github.com/Nehanth/pooled/releases/download/v0.2.0/swarmllm-demo-2026-09-07.mp4">the September 7 demo</a>.</sub></p>
 
-Pooled runs one open model across the devices in a room. Your laptop, a friend's desktop and a phone each hold some of the model's layers, and together they run a model none of them could run alone. You can chat with it, or switch to Code mode and let it build and fix a small app right in the tab. There is nothing to install and no account, and no server does any of the thinking.
+Pooled runs one open model across the devices in a room. Your laptop, a friend's desktop and a phone each hold some of the model's layers, and together they run a model none of them could run alone. A model bigger than a device's GPU memory keeps most of itself on the SSD and streams what each token needs into the GPU (Qwen3.8 Flash, 125B, experimental), and every device that joins holds more of it in memory, so it gets faster. You can chat with it, or switch to Code mode and let it build and fix a small app right in the tab. There is nothing to install and no account, and no server does any of the thinking.
 
 ## How it works
 
@@ -46,6 +46,7 @@ Models in the room today:
 | Qwen 3.8 27B | Q4_0, needs ~17 GB across the room | hybrid Gated DeltaNet + attention, built-in draft layer for speculative decoding, 16K context (up to 64K) |
 | Qwen 3.6 35B MoE | Q4_0, needs ~22.5 GB across the room | 256 experts, 8 active per token, so it decodes several times faster than the 27B; 32K context (up to 128K) |
 | Qwen3 1.7B | Q8_0, needs ~5.6 GB across the room for 16K context, ~4 GB for 8K | small and quick, for rooms of phones and light laptops; 16K context, 8K when the room is short of memory |
+| Qwen3.5 122B MoE | Q4_0, a 72.5 GB download, needs ~73 GB across the room | 256 experts, 8 active per token; in `pooled pull` / `pooled host` (CLI 0.4.0+), on the room page only with `?dev=1`. A Mac Studio plus an RTX 5070 PC keeping its experts in RAM runs it at ~17 tok/s |
 | Qwen3.8 Flash (**experimental**) | Q4_0, 125B (6B active), ~99 GB on disk | 512 experts, 10 active per token; keeps most of itself on disk, so it needs far less GPU memory than its size; 64K context. See below |
 
 Every device downloads only its own layers, from Hugging Face or from another device in the room that already has them, and keeps them cached for next time. If a device leaves, the room says so and the host deals its layers out again with one click. Speculative decoding, batched prefill and every kernel trick are checked by golden tests, so the speculative stream is the same as plain decoding.
@@ -64,6 +65,8 @@ It is **experimental**:
 - It is slower than the other models, most of all on one computer, where much of it comes from disk.
 - The first run downloads about 99 GB and asks before storing it on the device.
 - How it loads and what it needs may change between releases.
+
+Demo video: [Qwen3.8 Flash in a Chrome tab on a Mac Studio, then an RTX 5070 PC joins](https://pooled.run/docs/media/flash-demo.mp4) (recorded October 13, 2026, 2:13, subtitles; the room gets 1.4x faster when the PC joins).
 
 Pick it in the room's model picker. To lend a computer from the command line, run the CLI from this repo for now, not from npm: [cli/README.md](cli/README.md#qwen38-flash-experimental-run-the-cli-from-the-repo).
 
@@ -151,7 +154,9 @@ NVIDIA GB10 (DGX Spark), Chrome, 2026-09-26, coding prompts, speculative decodin
 | Qwen 3.6 35B MoE | 40–46 tok/s | 65–84 tok/s | 85.5 tok/s decode, 2520 tok/s prefill |
 | Qwen 3.8 27B | 10.1–10.8 tok/s | 20–27 tok/s | 13.8 tok/s decode |
 
-Native llama.cpp is still ahead on plain decode (about 2x on the MoE, 1.3x on the 27B). Speculative decoding closes most of that on code, where 70–85% of drafts are accepted. Prefill is the biggest gap: the first token of a 172-token prompt takes about 1.0 s on the MoE and 2.5 s on the 27B, against roughly 0.07 s and 0.5 s native. Faster prefill is the top item on the roadmap.
+Since this table (main as of 2026-10-02, same GB10, see docs/bench-log.md): MoE prompt processing is about 2x faster (Deno, 2048 tokens: 402 -> 861 tok/s, #314) and MoE plain decode in Chrome on a chat prompt is 63.9 tok/s at 1K context, 59.6 at 8K and 50.1 at 32K (#315). DP4a prefill is now the default on NVIDIA for both the dense models and the MoE. The rows above are kept as measured on their date; the prompts differ, so don't compare them directly with the newer numbers.
+
+Native llama.cpp is still ahead on plain decode (in this table about 2x on the MoE and 1.3x on the 27B; on the MoE's 2026-10-02 numbers, 63.9 against 85.2 tok/s, about 1.3x). Speculative decoding closes most of that on code, where 70–85% of drafts are accepted. Prefill is the biggest gap (MoE prefill is now ~861 tok/s against llama.cpp's ~2,400): in this table the first token of a 172-token prompt takes about 1.0 s on the MoE and 2.5 s on the 27B, against roughly 0.07 s and 0.5 s native. Faster prefill is the top item on the roadmap.
 
 ### Across devices, with emulated network latency
 
@@ -181,7 +186,7 @@ Other projects split models across machines or run models in a browser tab. Each
 
 | Project | Runs in | Pools several devices | Install per device | Published speed (source, hardware) | Coding agent built in |
 |---|---|---|---|---|---|
-| **Pooled** | browser tab (WebGPU) | yes, layers split across laptops, desktops and phones over WebRTC | none, open a URL | 35B MoE: 40–46 tok/s plain, 65–84 speculative on one GB10; 13 / 21 on two devices at 20 ms emulated latency ([Performance](#performance)) | yes, Code mode runs in the tab |
+| **Pooled** | browser tab (WebGPU) | yes, layers split across laptops, desktops and phones over WebRTC | none, open a URL | 35B MoE: 40–46 tok/s plain, 65–84 speculative on one GB10 (2026-09-26, coding prompts; 64 plain at 1K context on 2026-10-02); 13 / 21 on two devices at 20 ms emulated latency ([Performance](#performance)) | yes, Code mode runs in the tab |
 | [exo](https://github.com/exo-explore/exo) | native (MLX); macOS app, Linux CPU only for now | yes, with RDMA over Thunderbolt 5 on Macs | macOS app (DMG or `brew install --cask exo`) or build from source | 31.9 tok/s Qwen3 235B and 32.5 tok/s DeepSeek V3.1 671B, both on 4x M3 Ultra Mac Studio ([Jeff Geerling](https://www.jeffgeerling.com/blog/2025/15-tb-vram-on-mac-studio-rdma-over-thunderbolt-5/)) | no |
 | [llama.cpp RPC](https://github.com/ggml-org/llama.cpp/tree/master/tools/rpc) | native | yes, remote ggml devices | build with `-DGGML_RPC=ON` on every host; the docs call it fragile and insecure, never for open networks | Qwen3 235B: 20.4 tok/s on 1 node, 15.2 tok/s on 4 nodes, 4x M3 Ultra ([Jeff Geerling](https://www.jeffgeerling.com/blog/2025/15-tb-vram-on-mac-studio-rdma-over-thunderbolt-5/)) | no |
 | [distributed-llama](https://github.com/b4rtaz/distributed-llama) | native (CPU, experimental Vulkan) | yes, tensor parallel, power-of-2 node counts | C++ build plus Python launcher | Llama 3.2 3B Q40: 5.95 tok/s on 1 Pi 5, 13.68 tok/s on 4 Pi 5 ([#165](https://github.com/b4rtaz/distributed-llama/discussions/165)); Qwen3 30B A3B: 13.04 tok/s on 4 Pi 5 ([#255](https://github.com/b4rtaz/distributed-llama/discussions/255)) | no |
