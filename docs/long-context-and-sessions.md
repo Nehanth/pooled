@@ -96,7 +96,7 @@ Example rooms (the picker's need per choice: `ctxOptions`, the GPU memory these 
 | Room | Model | 8K | 16K | 32K | 64K | 128K | Opens at |
 |---|---|---|---|---|---|---|---|
 | Mac 16 + desktop 7 + iPhone 1 (24 GB) | MoE | 20.9 | | 21.4 | 22.1 | 23.5 | 128K, the phone holds nothing |
-| Mac 17 + desktop 6 + iPhone 1 (24 GB) | MoE | | | | fits | fits with the phone | 64K (128K would put layers on the phone) |
+| Mac 17 + desktop 6 + iPhone 1 (24 GB) | MoE | 21.0 | | 21.5 | 22.1 | 23.3 (with the phone holding layers) | 64K (128K would put layers on the phone) |
 | Mac 14 + desktop 8 + iPhone 1 (23 GB) | MoE | 21.4 | | 21.8 | 22.5 | needs 0.7 GB more | 64K |
 | RTX 12 GB + 48 GB RAM (`pooled host --here`) | MoE | 6.2 | | 6.7 | 7.3 | 8.6 | 32K: experts in RAM at every length, so the default |
 | Mac 16 + desktop 8 (24 GB) | 27B | 16.5 | 17.0 | 18.0 | 20.1 | | 64K |
