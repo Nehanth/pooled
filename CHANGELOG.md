@@ -4,6 +4,8 @@ All notable changes to Pooled (called SwarmLLM before September 2026). Format fo
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-10-16
+
 ### Changed
 - **The 27B and the 35B MoE open at a long context by default; `?ctx=` is no longer needed** (#421). Each has a ladder of lengths checked correct on it (27B: 64K, 32K, 16K, 8K; MoE: 128K, 64K, 32K, 16K, 8K), and a room opens at the longest step its memory holds, past the old default (16K / 32K) only at full speed: no expert offloaded to RAM or disk and no more devices holding layers than at the default (a longer window alone costs memory, not decode speed: identical tokens and tok/s at 32K and 128K on the GB10). A room short even for the default now opens at a shorter step (down to 8K) and says so, instead of not starting. The picker's **Context** row (8K/16K/32K/64K on the 27B, 8K/32K/64K/128K on the MoE) shows each length's memory in the room and picks another; Room settings changes it while the model runs. The room page, `pooled host` / `pooled serve`'s room and the OpenClaw plugin pick the same context (`room/ctxpick.js` `roomCtxPlan`); room nodes no longer open the MoE at 128K whatever the room holds. `?ctx=N` / `--ctx N` still ask for an exact length. The 1.7B and Flash are unchanged.
 
