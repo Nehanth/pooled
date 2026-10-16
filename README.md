@@ -65,7 +65,7 @@ It is **experimental**:
 - The first run downloads about 99 GB and asks before storing it on the device.
 - How it loads and what it needs may change between releases.
 
-Pick it in the room's model picker. `pooled join` lends to a room running it, and `pooled host` lists it with `POOLED_DEV=1` ([cli/README.md](cli/README.md)).
+Pick it in the room's model picker. To lend a computer from the command line, run the CLI from this repo for now, not from npm: [cli/README.md](cli/README.md#qwen38-flash-experimental-run-the-cli-from-the-repo).
 
 Details: [docs/architecture.md](docs/architecture.md), [docs/kernels.md](docs/kernels.md), [docs/protocol.md](docs/protocol.md), [docs/models.md](docs/models.md).
 

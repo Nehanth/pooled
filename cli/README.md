@@ -418,6 +418,22 @@ room HJQ-N44 · online · 2 devices · layers 14-27 of qwen3-1.7b · 56.4 tok/s 
 
 Not included yet: running as a background service (it is a foreground command), and phones (they join from the room page).
 
+### Qwen3.8 Flash (experimental): run the CLI from the repo
+
+Qwen3.8 Flash is **experimental**, and the `@pooled/cli` package on npm doesn't have its newest code yet. To lend a computer to a Flash room, or host one, run the CLI from a clone of the repo (Node 22 or newer):
+
+```bash
+git clone https://github.com/Nehanth/pooled.git
+cd pooled/cli && npm install
+(cd ../packages/room-node && npm install)        # the room node and Dawn (WebGPU), for join and host
+
+node bin/pooled.js join <ROOM CODE>               # lend this computer to a Flash room
+node bin/pooled.js pull qwen3.8-flash             # optional: download its 93.7 GB first
+POOLED_DEV=1 node bin/pooled.js host qwen3.8-flash   # open a Flash room from this computer
+```
+
+Every option above works the same way (`--gb`, `--ram`, `--disk`, `--here`). `git pull` in the clone picks up fixes. Once a release of `@pooled/cli` carries Flash, `npx @pooled/cli join` does the same.
+
 ## Development
 
 ```bash
