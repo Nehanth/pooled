@@ -303,7 +303,7 @@ Not downloaded (pooled pull <model>):
   …
 ```
 
-The list includes the Qwen3.5 122B MoE (`qwen3.5-122b-moe`, two files, 72.5 GB): `pooled host` says it needs about 73 GB across the room, for a room of big machines or one with a PC that keeps its experts in RAM (below). The room page lists it only with `?dev=1`. Qwen3.8-Flash-Next (`qwen3.8-flash`, three files, 100.6 GB, of which 28.8 GB is an n-gram table that stays on the disk of the device holding layer 1) is a preview: `pooled host` and `list` show it only with `POOLED_DEV=1` (named without it, they say so). `pooled join` needs no flag to lend to a room that runs it, and `pooled pull qwen3.8-flash` / `pooled rm qwen3.8-flash` take its full name without `POOLED_DEV=1`, so a device can have its files before it joins. It needs about 67 GB (GiB, the unit pledges use) across the room, context up to 2048; a `pooled` device with a discrete GPU parks its experts in RAM (and reads them from the files with the disk tier) as for the other MoE models. One GB10 holds it alone with `POOLED_DEV=1 pooled host qwen3.8-flash --here`.
+The list includes the Qwen3.5 122B MoE (`qwen3.5-122b-moe`, two files, 72.5 GB): `pooled host` says it needs about 73 GB across the room, for a room of big machines or one with a PC that keeps its experts in RAM (below). The room page lists it only with `?dev=1`. Qwen3.8-Flash-Next (`qwen3.8-flash`, three files, 100.6 GB, of which 28.8 GB is an n-gram table that stays on the disk of the device holding layer 1) is **experimental** (the CLI calls it a preview): `pooled host` and `list` show it only with `POOLED_DEV=1` (named without it, they say so). `pooled join` needs no flag to lend to a room that runs it, and `pooled pull qwen3.8-flash` / `pooled rm qwen3.8-flash` take its full name without `POOLED_DEV=1`, so a device can have its files before it joins. It needs about 72 GB (GiB, the unit pledges use) across the room at its longest proven context, 64K (about 67 GB at 2K: a room short for 64K opens at the longest length it holds); a `pooled` device with a discrete GPU parks its experts in RAM (and reads them from the files with the disk tier) as for the other MoE models. One GB10 holds it alone with `POOLED_DEV=1 pooled host qwen3.8-flash --here`.
 
 A download is written to `<file>.part` and resumes where it stopped (Ctrl-C, a lost network: run `pooled pull` again, it asks for the rest with a Range request); the file is checked against its size and SHA-256 before it is renamed and used. `pooled download` is the same command, `pooled ls` the same as `pooled list`, and `pooled rm <model>` deletes one. A part of a name works: `pooled pull 35b`. Without a terminal the progress is a plain line every few seconds.
 
@@ -417,6 +417,22 @@ room HJQ-N44 · online · 2 devices · layers 14-27 of qwen3-1.7b · 56.4 tok/s 
 **Windows.** `join` and `host` run on D3D12. On a Windows computer the browser is the fallback: if `pooled join` says this GPU's shader compiler can't build a kernel, open the room's link in Chrome or Edge instead, which compile the same kernels with their own compiler. On a laptop or desktop with two GPUs (integrated and discrete), set Chrome or Edge to **High performance** in Windows Settings > System > Display > Graphics, or the browser picks the integrated GPU.
 
 Not included yet: running as a background service (it is a foreground command), and phones (they join from the room page).
+
+### Qwen3.8 Flash (experimental): run the CLI from the repo
+
+Qwen3.8 Flash is **experimental**, and the `@pooled/cli` package on npm doesn't have its newest code yet. To lend a computer to a Flash room, or host one, run the CLI from a clone of the repo (Node 22 or newer):
+
+```bash
+git clone https://github.com/Nehanth/pooled.git
+cd pooled/cli && npm install
+(cd ../packages/room-node && npm install)        # the room node and Dawn (WebGPU), for join and host
+
+node bin/pooled.js join <ROOM CODE>               # lend this computer to a Flash room
+node bin/pooled.js pull qwen3.8-flash             # optional: download its 93.7 GB first
+POOLED_DEV=1 node bin/pooled.js host qwen3.8-flash   # open a Flash room from this computer
+```
+
+Every option above works the same way (`--gb`, `--ram`, `--disk`, `--here`). `git pull` in the clone picks up fixes. Once a release of `@pooled/cli` carries Flash, `npx @pooled/cli join` does the same.
 
 ## Development
 

@@ -196,13 +196,15 @@ Deno.test("flash picker: the row at 2048 and 8K from the planner's costs (roomFi
   const def = roomBytes(F, CTX[F].def), needDef = (def.L * def.layerBytes + def.hostBytes) / GB;
   ok(NEED_GB[F] >= needDef && NEED_GB[F] - needDef < 0.1, `${NEED_GB[F]} vs ${needDef}`);
   // roomBytes is memoized per context (the picker's ~24 minFitPledge probes reuse one cost array)
-  ok(roomBytes(F, 8192) === roomBytes(F, 8192) && roomBytes(F, 8192).layerCost === flashLayerCost(F, 8192));
+  // (roomBytes' kv is the room's format: f16 by default, flashRoomLimits)
+  ok(roomBytes(F, 8192) === roomBytes(F, 8192) && roomBytes(F, 8192).layerCost === flashLayerCost(F, 8192, { kv: "f16" }));
   const fitAt = (ctx, pl, metas) => { const rb = roomBytes(F, ctx); return roomFit(rb.L, pl, rb.layerCost, rb.hostBytes, offloadFor(metas, rb.experts, F)); };
   const sparks = [node(64), node(64)], pl = sparks.map((m) => pledgeGB(m, Infinity, F) * GB);
   const need = { 2048: minFitPledge(pl, (p) => fitAt(2048, p, sparks).fits).bytes / GB, 8192: minFitPledge(pl, (p) => fitAt(8192, p, sparks).fits).bytes / GB };
-  ok(need[8192] > need[2048] + 1 && need[8192] < need[2048] + 2, JSON.stringify(need));
-  // two Sparks lending 34.5 GB each hold it at 2048 but not at 8K (state + its 2-slot reserve)
-  const tight = [34.5 * GB, 34.5 * GB];
+  // (f16 K / V, the rooms' format: 8K's state and its 2-slot reserve add ~0.8 GB)
+  ok(need[8192] > need[2048] + 0.5 && need[8192] < need[2048] + 2, JSON.stringify(need));
+  // two Sparks lending 34.3 GB each hold it at 2048 but not at 8K (state + its 2-slot reserve, f16)
+  const tight = [34.3 * GB, 34.3 * GB];
   ok(fitAt(2048, tight, sparks).fits && !fitAt(8192, tight, sparks).fits);
   // the Mac tab with the disk tier: the GPU memory it needs stays a few GB at both
   const tab = [{ webgpu: true, contribGB: 22, tabDisk: { ramGB: 3, models: [F] } }], tpl = [22 * GB];

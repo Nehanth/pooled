@@ -48,9 +48,26 @@ Models in the room today:
 | Qwen 3.6 35B MoE | Q4_0, needs ~22.5 GB across the room | 256 experts, 8 active per token, so it decodes several times faster than the 27B; 32K context (up to 128K) |
 | Qwen3 1.7B | Q8_0, needs ~5.6 GB across the room for 16K context, ~4 GB for 8K | small and quick, for rooms of phones and light laptops; 16K context, 8K when the room is short of memory |
 | Qwen3.5 122B MoE | Q4_0, a 72.5 GB download, needs ~73 GB across the room | 256 experts, 8 active per token; in `pooled pull` / `pooled host` (CLI 0.4.0+), on the room page only with `?dev=1`. A Mac Studio plus an RTX 5070 PC keeping its experts in RAM runs it at ~17 tok/s |
-| Qwen3.8-Flash-Next (preview) | Q4_0, a 100.6 GB download (71.8 GB of layers plus a 28.8 GB n-gram table) | 177B in the files (125B of model, 6B active per token: 512 experts, 10 active, plus a 51B n-gram table). Greedy output matches llama.cpp. A tab keeps its experts on the SSD (copied once into the browser's storage, after the user allows it), so a Mac tab runs it alone at 7.0-8.5 tok/s and with an RTX 5070 PC at 10-12 tok/s. In the picker for everyone; in the terminal `pooled host` / `list` still need `POOLED_DEV=1`. Rooms cap its context at 2048 tokens (longer context pending for 2.0) |
+| Qwen3.8 Flash (**experimental**) | Q4_0, 125B (6B active), ~99 GB on disk | 512 experts, 10 active per token; keeps most of itself on disk, so it needs far less GPU memory than its size; 64K context. See below |
 
 Every device downloads only its own layers, from Hugging Face or from another device in the room that already has them, and keeps them cached for next time. If a device leaves, the room says so and the host deals its layers out again with one click. Speculative decoding, batched prefill and every kernel trick are checked by golden tests, so the speculative stream is the same as plain decoding.
+
+### Qwen3.8 Flash (experimental)
+
+Qwen3.8 Flash is a 125B mixture-of-experts model that uses about 6B of its parameters per token. It is far bigger than the GPU memory of most computers, so Pooled keeps most of it on disk: each device stores its share of the model's experts on its SSD (in the browser's storage for a tab), keeps the experts it used recently in a GPU cache, and reads the rest from disk as a token needs them. A single computer can run it on its own this way.
+
+Pooling makes it faster. Reading from disk is the slow part, and each device that joins holds part of the model in its own memory, so less of it has to come from disk. The room deals the model out again as devices join or leave.
+
+Measured in October 2026: a Mac Studio running it alone in a Chrome tab decodes about 8 tokens/s. With a PC with an RTX 5070 joined (`pooled join`), the pair decodes about 10-12 tokens/s, depending on the network between them.
+
+It is **experimental**:
+
+- Context goes up to 64K tokens, tested against llama.cpp. 128K is in progress.
+- It is slower than the other models, most of all on one computer, where much of it comes from disk.
+- The first run downloads about 99 GB and asks before storing it on the device.
+- How it loads and what it needs may change between releases.
+
+Pick it in the room's model picker. To lend a computer from the command line, run the CLI from this repo for now, not from npm: [cli/README.md](cli/README.md#qwen38-flash-experimental-run-the-cli-from-the-repo).
 
 Details: [docs/architecture.md](docs/architecture.md), [docs/kernels.md](docs/kernels.md), [docs/protocol.md](docs/protocol.md), [docs/models.md](docs/models.md).
 

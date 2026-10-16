@@ -50,7 +50,7 @@ import { unpackWire, wireStats } from "../../room/wire.js";
 import { TeleMeter, expertStoreOf } from "../../room/tele.js";
 import { isPhoneMeta, roomFit, dealRoom, shortNote, specWithOffload, dealOffloads, parseForce, layersTotal } from "../../room/plan.js";
 import { verifyHost, hostAllowed, startBusy, startFrom, joinOrder, START_PENDING_MS } from "../../room/authz.js";
-import { MODELS, CTX, roomBytes, maxSeqFor, ctxForBinding, kvModeFor, kvForLoad, kvBytesPerLayerPos, MAX_NEW, MIN_ROOM, pickCtx, ctxShortNote, expertsOf, ngramOf, flashLayerCost,
+import { flashRoomLimits, ckptSlotsAt, MODELS, CTX, roomBytes, maxSeqFor, ctxForBinding, kvModeFor, kvForLoad, kvBytesPerLayerPos, MAX_NEW, MIN_ROOM, pickCtx, ctxShortNote, expertsOf, ngramOf, flashLayerCost,
   flashRoomFormat, flashReadyFields, readyCtxShort, flashDealReserve } from "../../room/models.js";
 import { CkptIndex, CKPT_DEFAULTS, boundaryPin, pinPoints, cutPoints, turnPoint } from "./ckpt.js";
 import { CkptDisk, modelFileId, prefixHash, roomKey } from "./ckptdisk.js";
@@ -1046,15 +1046,24 @@ export class RoomNode extends EventEmitter {
   // when the pledges hold the model there (roomBytes: weights + KV at that context, and what the host
   // holds besides), else the model's fallback when they hold it there (the 1.7B: 8k for 16k); an asked
   // --ctx stays. -> { ctx, want, fits, fellBack, note } (note: what the room says when it fell back)
+  // (Qwen3.8-Flash-Next: within the room's K / V format and the longest context its devices take, room/models.js
+  // flashRoomLimits, as the room page's roomCtxPlan; fkv: that format, for the deal's sizes)
   static ctxPick(modelKey, { want, ask = 0, kv = "f16", self, peers = [], shareCap = new Map() }) {
     const pl = [self, ...peers].map((d) => dealPledgeBytes(d.meta, shareCap.get(d.name), modelKey));
-    const pick = pickCtx(modelKey, { want, ask, fitsAt: (c) => {
-      const rb = roomBytes(modelKey, c, kv === "q8" ? "q8" : "f16");
-      return !rb || roomFit(rb.L, pl, rb.layerCost || rb.layerBytes, rb.hostBytes, offloadFor([self, ...peers].map((d) => d.meta), rb.experts || rb.expertBytes, modelKey)).fits;
+    const metas = [self, ...peers].map((d) => d.meta), lim = flashRoomLimits(modelKey, metas);
+    const fkv = lim.kv || (kv === "q8" ? "q8" : "f16");
+    const pick = pickCtx(modelKey, { want, ask, cap: lim.cap, fitsAt: (c) => {
+      const rb = roomBytes(modelKey, c, fkv);
+      return !rb || roomFit(rb.L, pl, rb.layerCost || rb.layerBytes, rb.hostBytes, offloadFor(metas, rb.experts || rb.expertBytes, modelKey)).fits;
     } });
-    return { ...pick, note: pick.fellBack ? ctxShortNote(String(MODELS[modelKey]?.label || modelKey).split("·")[0].trim(), pick.ctx, pick.want) : "" };
+    return { ...pick, fkv, note: pick.fellBack ? ctxShortNote(String(MODELS[modelKey]?.label || modelKey).split("·")[0].trim(), pick.ctx, pick.want) : "" };
   }
   setSplit(mode) { this.splitMode = mode === "speed" ? "speed" : "memory"; }
+  // the checkpoint slots this room keeps: --ckpt's, held to the deal's reserve in a long Flash room (ai.ckptLimit)
+  ckptOptsNow() {
+    const o = this.ckptOpts, l = this.ai.ckptLimit;
+    return o && l ? { ...o, answers: Math.min(o.answers, l.answers), pins: Math.min(o.pins, l.pins) } : o;
+  }
   // fitBytes: room/models.js roomBytes() for the model at this context (weights + KV per layer, what the
   // host holds besides): the deal holds each device to it, as the room page's roomFit does
   // A pledge is a promise (#271): no device is dealt more whole layers than fit in what it lends (the
@@ -1154,10 +1163,15 @@ export class RoomNode extends EventEmitter {
     ai.ctxWant = pick.fellBack ? pick.want : 0;
     ai.ctxNote = pick.note;
     if (ai.ctxNote) this.log(ai.ctxNote);
-    const layerCost = flashG ? flashLayerCost(flashG, ctx) : null;
+    // Qwen3.8-Flash-Next past 2048: each checkpoint slot can be the room's whole state (~1.6 GB a device at 128K in f16),
+    // and the deal reserved CKPT_RESERVE_SLOTS of them (room/models.js flashLayerCost): keep at most that many (one
+    // answer, one pinned prefix), so the slots never outgrow what the deal set aside mid-chat
+    ai.ckptLimit = M.kind === "qwen4exp" && ckptSlotsAt(ctx) > 0 ? { answers: 1, pins: Math.max(0, ckptSlotsAt(ctx) - 1) } : null;
+    if (ai.ckpt) Object.assign(ai.ckpt, this.ckptOptsNow());
+    const layerCost = flashG ? flashLayerCost(flashG, ctx, { kv: pick.fkv === "f32" ? "f32" : "f16" }) : null;
     if (layerCost) layerBytes = layersTotal(layerCost, L) / L;   // (their average: ai.layerGB)
     const plan = RoomNode.dealPlan({ L, layerBytes, layerCost, embedBytes, self: { name: this.name, meta: this.meta }, peers, shareCap: ai.shareCap, mode: this.splitMode,
-      fitBytes: roomBytes(modelKey, ctx, kv === "q8" ? "q8" : "f16"), experts, model: modelKey, ngram: ngramOf(modelKey) });
+      fitBytes: roomBytes(modelKey, ctx, pick.fkv), experts, model: modelKey, ngram: ngramOf(modelKey) });
     if (!plan.fit.fits) {
       // short: the room stops instead of dealing past a pledge (a re-deal after a device left that the
       // others cannot hold, or a pledge lowered since the start): the host frees its layers, the
@@ -1445,7 +1459,7 @@ export class RoomNode extends EventEmitter {
   ckptSave(pin = false, turn = false) {
     const ai = this.ai, E = ai.engine;
     if (!this.ckptOn() || !ai.fed?.length) return null;
-    ai.ckpt ||= new CkptIndex(this.ckptOpts);
+    ai.ckpt ||= new CkptIndex(this.ckptOptsNow());
     // a worker applies sv before dp: a save riding with DROP_ALL would be gone at once on every worker
     if (ai.chain.length && [].concat(ai.pendingCtl?.dp ?? []).includes(DROP_ALL)) return null;
     // a save still waiting for its frame never reached the chain: the header carries one save, so
@@ -1508,9 +1522,9 @@ export class RoomNode extends EventEmitter {
     const ai = this.ai, E = ai.engine, gen = ai.dealGen, room = ai.diskRoom = this.diskRoomKey(), local = this.diskLocal();
     if (!room) return { restored: 0 };
     const t0 = performance.now();
-    const have = (await this.disk.list({ room, local })).filter((c) => Array.isArray(c.ids) && c.ids.length === c.n).slice(0, this.ckptOpts.pins);
+    const have = (await this.disk.list({ room, local })).filter((c) => Array.isArray(c.ids) && c.ids.length === c.n).slice(0, this.ckptOptsNow().pins);
     if (!have.length) return { restored: 0 };
-    ai.ckpt ||= new CkptIndex(this.ckptOpts);
+    ai.ckpt ||= new CkptIndex(this.ckptOptsNow());
     const loads = have.map((c) => ({ slot: ai.ckpt.nextKey(), h: c.h, ids: c.ids }));
     const asks = ai.chain.map((id) => new Promise((res) => {
       const timer = setTimeout(() => { ai.diskWait.delete(id); res([]); }, timeoutMs);

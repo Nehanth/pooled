@@ -124,7 +124,7 @@ Deno.test("CTX caps: one layer's K (or V) buffer at max ctx, against WebGPU's 12
     "qwen3.6-35b-moe": { kvHeads: 2, headDim: 256, bytes: 2 },  // f16 KV
     "qwen3.5-122b-moe": { kvHeads: 2, headDim: 256, bytes: 2 }, // f16 KV (the 35B's K/V row)
     "qwen3-1.7b": { kvHeads: 8, headDim: 128, bytes: 4 },       // dense engine keeps f32 KV
-    "qwen3.8-flash": { kvHeads: 2, headDim: 256, bytes: 4 },    // the phase-1 Flash engine keeps f32 KV (2048 max)
+    "qwen3.8-flash": { kvHeads: 2, headDim: 256, bytes: 2 },    // rooms keep Flash's K / V in f16 (FLASH_ROOM_KV): 128 MiB at 131072
   };
   for (const [model, c] of Object.entries(CTX)) {
     const s = shape[model];
