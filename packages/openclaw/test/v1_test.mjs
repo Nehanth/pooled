@@ -129,7 +129,8 @@ test("onboarding (host): the GPU's default pledge, the model list, 'don't downlo
 
 test("onboarding (host): the 35B MoE is preselected when this device holds it, else the 27B; no small-model warning for them", async () => {
   const models = tmp("models");
-  for (const [gb, want] of [[40, "qwen3.6-35b-moe"], [22, "qwen3.8-27b"]]) {
+  // (22 GB holds the MoE at its 32k default, the ladder's full-speed step there: 64k; 20 GB holds it at no step, the 27B at 64k)
+  for (const [gb, want] of [[40, "qwen3.6-35b-moe"], [22, "qwen3.6-35b-moe"], [20, "qwen3.8-27b"]]) {
     deps.memoryDefaults = () => ({ mem: { kind: "unified", name: "M5", totalGB: 64 }, def: gb, max: 48, label: "M5 · 64 GB" });
     const p = prompter(["host", String(gb), want, "stream", 1, true]);
     const res = await runSetup({ prompter: p, config: { plugins: { entries: { pooled: { config: { modelDir: models } } } } } });

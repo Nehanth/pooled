@@ -94,7 +94,7 @@ print(m.content[0].text)
 
 ## Pick a model for agents
 
-Coding agents send long prompts (15,000 to 20,000 tokens for Codex and Claude Code) and need a model that calls tools reliably. Use the **Qwen3.6 35B MoE** (32K context, up to 64K) or the **Qwen3.8 27B** at 32K. The Qwen3 1.7B is too small for them. See [Limits and context](/docs/serve/limits).
+Coding agents send long prompts (15,000 to 20,000 tokens for Codex and Claude Code) and need a model that calls tools reliably. Use the **Qwen3.6 35B MoE** or the **Qwen3.8 27B**: rooms open them at the longest context their memory holds (up to 128K and 64K). The Qwen3 1.7B is too small for them. See [Limits and context](/docs/serve/limits).
 
 :::caution[Your prompts go to the room]
 Everything a tool sends goes to the room's host and the devices that run the model. Coding tools send file contents and sometimes secrets. Only use a room you trust. See [Who sees your prompts](/docs/serve/options#who-sees-your-prompts).

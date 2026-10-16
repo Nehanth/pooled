@@ -27,7 +27,7 @@ import { chatRecipients } from "./room/visibility.js";
 import { validateApiAsk, apiPrompt, apiRun, AnswerCache, API_LIMITS, pieceDecoder, helloMeta, withStyle, apiPrompt2, apiRun2, TurnCache, EncodeCache } from "./room/api.js";
 import { tokenTexts } from "./harness/model-common.js";
 import { CkptStore } from "./room/ckpt-store.js";
-import { SHAPE, CTX, MODELS, DISK_COPY, NEED_GB, NEED_MIN_GB, FILE_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, ctxForBinding, kvBytesPerLayerPos, kvModeFor, kvForLoad, hostHeldBytes, denseKvBytesPerLayerPos, roomBytes, pickCtx, ctxK, ctxShortNote, needText, expertsOf, modelLoadOptions, ngramOf, flashLayerCost, flashTabHostMargin,
+import { SHAPE, CTX, MODELS, DISK_COPY, NEED_GB, NEED_MIN_GB, FILE_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, ctxTop, ctxFloor, needGBAt, ctxForBinding, kvBytesPerLayerPos, kvModeFor, kvForLoad, hostHeldBytes, denseKvBytesPerLayerPos, roomBytes, pickCtx, ctxK, ctxShortNote, needText, expertsOf, modelLoadOptions, ngramOf, flashLayerCost, flashTabHostMargin,
   flashLongMeta, flashRoomFormat, flashReadyFields, readyCtxShort, flashDealReserve } from "./room/models.js";
 // the context window of the loaded engine (per model: room/models.js CTX; 2048 for the small ones)
 const ctxMax = () => ai.engine?.maxSeq || MAX_SEQ;
@@ -599,10 +599,10 @@ function spareGBOf(meta) {
   const ceil = Math.min(rule.capped ? rule.max : 64, meta?.pledgeMax || 64, meta?.budgetGB ? Math.max(SMALLEST_NEED, Math.floor(meta.budgetGB)) : 64);
   return Math.max(0, +(ceil - pledgeGB(meta)).toFixed(1));
 }
-// The picker's context choice per model (Qwen3.8 Flash: room/ctxpick.js ctxOptions), remembered for this room in this
+// The picker's context choice per model (the 27B, the 35B MoE, Qwen3.8 Flash: room/ctxpick.js ctxOptions), remembered for this room in this
 // tab (sessionStorage, per room code): the longest context the room may open at. Start deals with it (aiStart:
 // roomCtxPlan's choice, as roomFitFor), and the devices load the room's context from ai-load. 0: none (the longest proven
-// context the room holds). ?ctx=N overrides it (an explicit ask, tried alone).
+// context the room holds at full speed: roomCtxPlan). ?ctx=N overrides it (an explicit ask, tried alone).
 const CTX_URL_ASK = +new URLSearchParams(location.search).get("ctx") || 0;
 const CTX_PICK_KEY = "pooled-ctx";
 function ctxChoiceFor(key) {
@@ -639,7 +639,7 @@ function roomFitFor(key) {
   const pick = plan;
   const fit = fitAt(pick.ctx), spare = devs.map((d) => spareGBOf(d.meta));
   const out = { fit, devs, ctx: pick.ctx, want: pick.want, fellBack: pick.fellBack, kv,
-    // the picker's context choices (Flash): each one's need here, and why it is off (room/ctxpick.js ctxOptions)
+    // the picker's context choices (the 27B, the MoE, Flash): each one's need here, and why it is off (room/ctxpick.js ctxOptions)
     ctxOpts: ask ? [] : ctxOptions(key, { metas, pledges, margin, kvAsk }),
     shortGB: gbUp(shortBy(fit, spare)), note: shortNote(shortName(key), fit, devs.map((d) => d.name), spare, PAGE_SHORT_FIX) };
   // a model kept on disk (room/models.js DISK_COPY): its need is the GPU memory the planner itself needs from these
@@ -690,7 +690,9 @@ function renderLadder(pledged, rows = fitLadder(pledged)) {
   const html = (none ? '<p class="ai-nogpu">Needs a device with WebGPU</p>' : "") + rows.map((x) => {
     // fits only at the model's fallback context: say which, with what it needs there
     const back = x.ok && x.f?.fellBack;
-    const gb = `<span class="nd">${back ? `${NEED_MIN_GB[x.key] ?? ""} GB · ${ctxK(x.f.ctx)}` : `${NEED_GB[x.key] ?? ""} GB`}</span>`;
+    // (at the ladder's last step or the fallback: NEED_MIN_GB; at a step between it and the default: the deal's own need there)
+    const backGB = back && (x.f.ctx === ctxFloor(x.key) ? NEED_MIN_GB[x.key] : needGBAt(x.key, x.f.ctx));
+    const gb = `<span class="nd">${back ? `${backGB ?? ""} GB · ${ctxK(x.f.ctx)}` : `${NEED_GB[x.key] ?? ""} GB`}</span>`;
     const fig = x.ok ? `${gb}<b>fits</b>` : none ? gb : `<span class="more">${x.short} GB short</span>`;
     // with no device that can hold layers, nothing reads as picked: there is nothing to start yet
     const sel = !none && x.key === $("ai-model").value;
@@ -713,7 +715,7 @@ function renderLadder(pledged, rows = fitLadder(pledged)) {
   if (had) el.querySelector('.rung[tabindex="0"]')?.focus({ preventScroll: true });
 }
 function pickRung(b) { if (!b || $("ai-model").disabled) return; setModelValue(b.dataset.k); modelTouched = true; updateCluster(); }
-// The context choice under the rows (a model with choices: Qwen3.8 Flash, room/ctxpick.js ctxOptions): each proven length
+// The context choice under the rows (a model with choices: the 27B, the 35B MoE, Qwen3.8 Flash, room/ctxpick.js ctxOptions): each proven length
 // with the GPU memory it needs in this room and about how long reading a full paste takes there; one this room can't
 // hold is off and says why. The picked one is the context the room opens at (roomFitFor's: the choice, or the longest
 // that fits). The same numbers as the need line, the pool and Start (roomCtxPlan). Room settings has the same choice
@@ -3855,11 +3857,13 @@ async function aiStart(modelArg) {
     ai.lapStat = null;                        // a new chain: lap timeouts start from the fixed fallbacks again
     const modelKey = $("ai-model").value;
     const M = MODELS[modelKey];
-    // context for this room: the model's default, or ?ctx=N up to its cap (room/models.js CTX); every
-    // device builds its engine with it. Without ?ctx= a room whose pledges hold the model only at its
-    // fallback (the 1.7B: 8K for 16K) opens it there (pickCtx, below)
+    // context for this room: ?ctx=N up to the model's cap (room/models.js CTX), else the picker's choice, else the longest
+    // step of the model's ladder the room holds (past its default only at full speed: room/ctxpick.js roomCtxPlan, below),
+    // or its fallback (the 1.7B: 8K for 16K); every device builds its engine with it
     const CTX_ASK = CTX_URL_ASK;
-    let ROOM_CTX = maxSeqFor(modelKey, CTX_ASK);
+    // (without ?ctx=: the top of the model's ladder, ctxTop; roomCtxPlan below walks it down to what the room holds)
+    let ROOM_CTX = CTX_ASK > 0 ? maxSeqFor(modelKey, CTX_ASK) : ctxTop(modelKey);
+    const ROOM_CTX0 = ROOM_CTX;
     const ROOM_KV = kvModeFor(modelKey, KV_ASK);   // KV cache format for every device: f16, or int8 with ?kv=q8
     // a model host that is not the room's creator (biggestPeerId) has links only to the creator and to
     // devices it dialed: link every device first, so the deal, ai-layers and ai-ready-all reach them all
@@ -3944,7 +3948,7 @@ async function aiStart(modelArg) {
     // (a device that refused the offload it was dealt, ai.noDisk: a tab keeping the model off its disk, an older node,
     // counts without any offload: no disk tier, nothing parked)
     const metasNow = () => [myMeta, ...ai.chain.map((id) => { const m = conns.get(id)?.meta; return m && ai.noDisk?.has(nameOf(id)) ? { ...m, tabDisk: undefined, offload: undefined, ramGB: undefined } : m; })];
-    const ctxCap = ROOM_CTX < maxSeqFor(modelKey, CTX_ASK) ? ROOM_CTX : Infinity;   // (a qwen35 room's binding limit)
+    const ctxCap = ROOM_CTX < ROOM_CTX0 ? ROOM_CTX : Infinity;   // (a qwen35 room's binding limit)
     let roomKv = null;
     const planNow = () => {
       const metas = metasNow();

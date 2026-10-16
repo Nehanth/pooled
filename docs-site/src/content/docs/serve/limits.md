@@ -18,10 +18,10 @@ The room's context is the most tokens one request can hold: prompt plus answer.
 | Model | Default | Most with `?ctx=` |
 |---|---|---|
 | Qwen3 1.7B | 16384 (8192 when the room is short of memory for 16K) | 16384 |
-| Qwen3.8 27B | 16384 | 32768 |
-| Qwen3.6 35B MoE | 32768 | 65536 |
+| Qwen3.8 27B | up to 65536: the longest the room holds at full speed, at least 16384 when it holds that | 65536 |
+| Qwen3.6 35B MoE | up to 131072: the longest the room holds at full speed, at least 32768 when it holds that | 131072 |
 
-The host sets it by opening the room page with `?ctx=` before starting the model, for example `pooled.run/room?ctx=65536`. The value is rounded to a multiple of 256, at least 2048.
+Most rooms that hold the 27B or the MoE open them at 64K or more on their own (see [Longer context](/docs/models#longer-context)); the picker's **Context** row picks another length. To ask for an exact one, the host opens the room page with `?ctx=` before starting the model, for example `pooled.run/room?ctx=65536`. The value is rounded to a multiple of 256, at least 2048.
 
 The bridge reports it in the banner, as `ctx` in `GET /health` and as `max_model_len` in `GET /v1/models`. Give it to coding agents so they compact in time: see [context settings](/docs/serve/recipes#context-settings-for-coding-agents).
 

@@ -47,13 +47,11 @@ Everything the tool sends, file contents included, goes to the room's host and t
 
 <Steps>
 
-1. **Start the room with a long context.** On the device that will host, open the room with `?ctx=` before you press **Start the model**:
+1. **Start the room.** On the device that will host, open [pooled.run/room](https://pooled.run/room), pick **Qwen3.6 35B MoE** and press **Start the model**. It opens at the longest context the room holds, 64K or 128K in most rooms that fit it; the **Context** row under the models shows which. To pin an exact length, such as the 64K in the example below, open the room with `?ctx=` before you press Start:
 
    ```text
    https://pooled.run/room?ctx=65536
    ```
-
-   Pick **Qwen3.6 35B MoE** and press **Start the model**. (For the 27B, use `?ctx=32768`.)
 
 2. **Copy the command.** In the room, press **Serve API** in the header. The page shows the command for this room with a **Copy** button. On the device that opened the room, it carries the invite link:
 

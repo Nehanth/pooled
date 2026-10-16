@@ -82,14 +82,15 @@ A new architecture or quantization format needs a design note first. See [Contri
 
 ## Context length
 
-The context a room opens with comes from `CTX` in `room/models.js`, and `?ctx=N` can raise it up to `max`:
+The context a room opens with comes from `CTX` in `room/models.js`, and `?ctx=N` can ask for any length up to `max`:
 
-| Model | Default | Max |
-|---|---|---|
-| Qwen 3.8 27B | 16384 | 32768 |
-| Qwen 3.6 35B MoE | 32768 | 65536 |
-| Qwen3 1.7B | 16384 (`fallback`: 8192) | 16384 |
+| Model | Default (`def`) | Ladder | Picker (`options`) | Max |
+|---|---|---|---|---|
+| Qwen 3.8 27B | 16384 | 65536, 32768, 16384, 8192 | 8K, 16K, 32K, 64K | 65536 |
+| Qwen 3.6 35B MoE | 32768 | 131072, 65536, 32768, 16384, 8192 | 8K, 32K, 64K, 128K | 131072 |
+| Qwen3.8-Flash-Next | 65536 | 65536 ... 2048 (`FLASH_CTX_PROVEN`) | 8K, 32K, 64K | 65536 |
+| Qwen3 1.7B | 16384 (`fallback`: 8192) | none | none | 16384 |
 
-A `fallback` is the context a room opens with when its pledges can't hold the model at the default but can there (`pickCtx`): the room page, `pooled host` and the OpenClaw plugin all pick it the same way, and say so. `NEED_MIN_GB` is the need at the fallback. An explicit `?ctx=` or `--ctx` is never lowered.
+A `ladder` is the lengths a room may open the model at, longest first; put a length on it only once it is checked correct on that model (`docs/long-context-and-sessions.md`). `room/ctxpick.js` `roomCtxPlan` picks one: the longest step the room's pledges hold, but past `def` only at full speed (the deal by memory keeps every expert on a GPU and uses no more devices than at `def`). A `fallback` is the context a room opens with when its pledges can't hold the model at the default but can there. The room page (picker and Start), the room node (`pooled host`, `pooled serve`'s room, the OpenClaw plugin) and `pooled host`'s screen all call `roomCtxPlan`, and say so when they fall back. `NEED_GB` is the need at `def`, `NEED_MIN_GB` at the fallback or the ladder's last step. An explicit `?ctx=` or `--ctx` is tried alone and never lowered.
 
 Without a `CTX` entry a model gets 8192 tokens on the hybrid engine and 2048 on the dense engine. The hybrid models keep a KV cache only on their full-attention layers, so long context is cheap in memory; the practical limit is prefill speed. See [Long context and sessions](/docs/internals/sessions).

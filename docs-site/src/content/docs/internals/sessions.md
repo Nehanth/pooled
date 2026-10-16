@@ -12,7 +12,7 @@ A coding agent resends almost its whole conversation on every turn: about 96% of
 
 ## Context per model
 
-Each model's default and maximum context are on [Models reference](/docs/reference/models). `?ctx=` on the model host's page asks for another size, rounded to a multiple of 256, at least 2,048 and at most the maximum. The KV cache is split with the layers, so each device holds only its own attention layers' share, and the practical limit is prefill time, not memory.
+Each model's default and maximum context are on [Models reference](/docs/reference/models). The 27B and the MoE open at the longest length of their ladder the room holds at full speed ([Longer context](/docs/models#longer-context)). `?ctx=` on the model host's page asks for another size, rounded to a multiple of 256, at least 2,048 and at most the maximum. The KV cache is split with the layers, so each device holds only its own attention layers' share, and the practical limit is prefill time, not memory.
 
 ## The KV cache
 

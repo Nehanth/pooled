@@ -279,8 +279,10 @@ Deno.test("pickCtx: 16K when it fits, 8K fallback when only that fits, an explic
   eq(ctxChoices(m, 16384, 16384), [16384], "an explicit ask is tried alone");
   eq(ctxChoices(m, 8192, 8192), [8192]);
   eq(ctxChoices(m, 4096), [4096], "a want at or below the fallback has nothing to fall back to");
-  eq(ctxChoices("qwen3.8-27b"), [16384], "no fallback on the 27B");
-  eq(ctxChoices("qwen3.6-35b-moe", 131072), [131072]);
+  eq(ctxChoices("qwen3.8-27b"), [16384, 8192], "the 27B's ladder below its default");
+  eq(ctxChoices("qwen3.8-27b", 65536), [65536, 32768, 16384, 8192], "the 27B's whole ladder from its top");
+  eq(ctxChoices("qwen3.6-35b-moe", 131072), [131072, 65536, 32768, 16384, 8192], "the MoE's ladder");
+  eq(ctxChoices("qwen3.6-35b-moe", 131072, 131072), [131072], "--ctx 131072 is tried alone");
   const tried = [];
   eq(pickCtx(m, { fitsAt: (c) => (tried.push(c), true) }), { ctx: 16384, want: 16384, fits: true, fellBack: false }, "fits at 16K");
   eq(tried, [16384], "16K first, nothing else tried when it fits");
@@ -288,10 +290,18 @@ Deno.test("pickCtx: 16K when it fits, 8K fallback when only that fits, an explic
   eq(pickCtx(m, { fitsAt: () => false }), { ctx: 8192, want: 16384, fits: false, fellBack: false }, "short for both: short for 8K, the least it could start with");
   eq(pickCtx(m, { want: 16384, ask: 16384, fitsAt: (c) => c <= 8192 }), { ctx: 16384, want: 16384, fits: false, fellBack: false }, "--ctx 16384 stays 16K (and short)");
   eq(pickCtx(m, { want: 8192, ask: 8192, fitsAt: () => true }), { ctx: 8192, want: 8192, fits: true, fellBack: false }, "?ctx=8192 is not a fallback");
-  eq(pickCtx("qwen3.8-27b", { fitsAt: () => false }).ctx, 16384, "a model without a fallback keeps its context");
+  eq(pickCtx("qwen3.8-27b", { fitsAt: () => false }).ctx, 8192, "the 27B short everywhere: short for its ladder's last step");
+  // past the default only where fastAt says so; want / fellBack measured against the default
+  const T = "qwen3.6-35b-moe", top = 131072;
+  eq(pickCtx(T, { want: top, fitsAt: () => true, fastAt: () => true }), { ctx: top, want: 32768, fits: true, fellBack: false }, "128K at full speed");
+  eq(pickCtx(T, { want: top, fitsAt: () => true, fastAt: (c) => c <= 65536 }), { ctx: 65536, want: 32768, fits: true, fellBack: false }, "64K at full speed, 128K not");
+  eq(pickCtx(T, { want: top, fitsAt: () => true, fastAt: () => false }), { ctx: 32768, want: 32768, fits: true, fellBack: false }, "no longer one at full speed: the default");
+  eq(pickCtx(T, { want: top, fitsAt: (c) => c <= 16384, fastAt: () => false }), { ctx: 16384, want: 32768, fits: true, fellBack: true }, "short for the default: 16K, fell back");
+  eq(pickCtx(T, { want: top, fitsAt: () => true }).ctx, top, "without fastAt (a choice): the longest that fits");
   eq(ctxK(16384), "16K"); eq(ctxK(8192), "8K");
   eq(ctxShortNote("Qwen3 1.7B", 8192, 16384), "Qwen3 1.7B · 8K context: the room's memory is short for 16K");
   eq(needText(m), "5.6 GB (4 GB at 8K)");
-  eq(needText("qwen3.8-27b"), `${NEED_GB["qwen3.8-27b"]} GB`);
+  eq(needText("qwen3.8-27b"), `${NEED_GB["qwen3.8-27b"]} GB (${NEED_MIN_GB["qwen3.8-27b"]} GB at 8K)`);
+  ok(NEED_MIN_GB["qwen3.8-27b"] < NEED_GB["qwen3.8-27b"] && NEED_MIN_GB["qwen3.6-35b-moe"] < NEED_GB["qwen3.6-35b-moe"]);
   eq(NEED_MIN_GB[m], 4);
 });

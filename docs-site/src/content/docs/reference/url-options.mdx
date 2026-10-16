@@ -29,7 +29,7 @@ Supported and stable.
 
 | Option | Default | Where | What it does |
 |---|---|---|---|
-| `?ctx=N` | per model | Host | Context window in tokens. Rounded to 256, at least 2048, at most the model's cap (below). |
+| `?ctx=N` | per model | Host | Context window in tokens: exactly this length, instead of the longest the room holds. Rounded to 256, at least 2048, at most the model's cap (below). |
 | `?kv=q8` | off (f16) | Host | int8 KV cache, about 56% of the memory. 27B and MoE only. Prefill of long prompts gets much slower. |
 | `?split=speed` or `memory` | `speed` | Host | Layer split, same as the room setting. See [How layers are split](/docs/rooms/split). |
 | `?phonelayers=1` | off | Host | Gives phones layers even when the computers can hold the model. |
@@ -47,16 +47,18 @@ Supported and stable.
 
 ### Context per model
 
+Without `?ctx=` the 27B and the MoE open at the longest length of their ladder the room holds at full speed (every expert on a GPU, no extra device holding layers), at least their old default when the room holds that; the picker's **Context** row picks another. See [Longer context](/docs/models#longer-context).
+
 | Model | Default | Largest `?ctx=` |
 |---|---|---|
 | Qwen3 1.7B | 16384 (8192 when the room is short of memory) | 16384 |
-| Qwen 3.8 27B | 16384 | 65536 |
-| Qwen 3.6 35B MoE | 32768 | 131072 |
+| Qwen 3.8 27B | the longest of 65536, 32768, 16384 the room holds at full speed (8192 when the room is short of memory for 16384) | 65536 |
+| Qwen 3.6 35B MoE | the longest of 131072, 65536, 32768 the room holds at full speed (16384 or 8192 when the room is short of memory for 32768) | 131072 |
 | Qwen3.5 122B MoE (`?dev=1`) | 32768 | 131072 |
 | Qwen3.8-Flash-Next (experimental) | 65536 (a room short of memory opens at the longest proven length it holds: 32768, 16384, 8192 or 2048) | 65536 (128K is in progress) |
 | Other models (tests and `?dev=1`) | 2048 (8192 on the hybrid engine) | same |
 
-Long context costs little memory on the 27B and MoE; what limits it is how long the prompt takes to read. See [Long context and sessions](/docs/internals/sessions).
+Long context costs little memory on the 27B and MoE (64K adds about 3 GB to the 27B's 16K, 128K about 2 GB to the MoE's 32K); what limits it is how long the prompt takes to read. See [Long context and sessions](/docs/internals/sessions).
 
 ## Room links
 
