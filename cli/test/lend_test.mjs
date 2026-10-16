@@ -82,6 +82,22 @@ test("Qwen3.8-Flash-Next is a preview: listed and accepted only with POOLED_DEV=
   } finally { if (prev == null) delete process.env.POOLED_DEV; else process.env.POOLED_DEV = prev; }
 });
 
+test("the Qwen3.5 122B MoE is a developer model: hidden without POOLED_DEV=1, and named it says so", () => {
+  const M = { ...MODELS, "qwen3.5-122b-moe": { kind: "qwen35" } };
+  assert.deepEqual(hostable(M, false), ["qwen3-1.7b", "qwen3.6-35b-moe"]);
+  assert.deepEqual(hostable(M, true), ["qwen3-1.7b", "qwen3.6-35b-moe", "qwen3.5-122b-moe"]);
+  assert.equal(devHint(M, "qwen3.5-122b-moe", false), "qwen3.5-122b-moe is a developer model: set POOLED_DEV=1 to use it");
+  assert.equal(devHint(M, "122b", false), "qwen3.5-122b-moe is a developer model: set POOLED_DEV=1 to use it");
+  assert.equal(devHint(M, "qwen3.5-122b-moe", true), "");
+  const prev = process.env.POOLED_DEV;
+  try {
+    delete process.env.POOLED_DEV;
+    assert.throws(() => parseLendArgs("host", ["122b"], { models: M }), /qwen3\.5-122b-moe is a developer model: set POOLED_DEV=1/);
+    process.env.POOLED_DEV = "1";
+    assert.equal(parseLendArgs("host", ["122b"], { models: M }).model, "qwen3.5-122b-moe");
+  } finally { if (prev == null) delete process.env.POOLED_DEV; else process.env.POOLED_DEV = prev; }
+});
+
 test("--gb: numbers, max, and the per-device cap", () => {
   assert.equal(parseGb(undefined), null);
   assert.deepEqual(parseGb("MAX"), { max: true });

@@ -79,8 +79,7 @@ Use the Qwen3.6 35B MoE (about 23 GB across the room). Onboarding preselects it 
 memory holds it, the Qwen3.8 27B (about 20 GB) when only that fits, and the MoE again when neither fits
 on this device alone (the room then waits for more devices). A `pooled join` device (`@pooled/cli`
 0.4.0 or newer) on a discrete GPU can make up a short room by keeping some experts in system RAM
-(`--ram`); the gateway holds its layers whole. The Qwen3.5 122B MoE is in `pooled host`, not in
-OpenClaw's onboarding. Picking the 1.7B, or joining a room that
+(`--ram`); the gateway holds its layers whole. Picking the 1.7B, or joining a room that
 runs it, shows: "Small models struggle with OpenClaw's long prompts and tools: expect slow turns and tool loops. Use the 35B MoE if your devices can hold it."
 
 Measured on a DGX Spark, the OpenClaw gateway hosting and a second device (`pooled join`) holding the
