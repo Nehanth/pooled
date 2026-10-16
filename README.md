@@ -65,7 +65,7 @@ It is **experimental**:
 - The first run downloads about 99 GB and asks before storing it on the device.
 - How it loads and what it needs may change between releases.
 
-Demo video: [Qwen3.8 Flash in a Chrome tab on a Mac Studio, then an RTX 5070 PC joins](https://pooled.run/docs/media/flash-demo.mp4) (recorded October 13, 2026, 2:13, subtitles; the room gets 1.4x faster when the PC joins).
+Demo video: [Qwen3.8 Flash in a Chrome tab on a Mac Studio, then an RTX 5070 PC joins](https://pooled.run/docs/media/flash-demo.mp4) (recorded October 13, 2026, 2:02, voice and subtitles; the room gets 1.4x faster when the PC joins).
 
 Pick it in the room's model picker. To lend a computer from the command line: `npx @pooled/cli join <ROOM CODE>` ([cli/README.md](cli/README.md#qwen38-flash-experimental-from-the-terminal)).
 

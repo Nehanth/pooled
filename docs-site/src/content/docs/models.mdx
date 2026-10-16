@@ -21,7 +21,7 @@ Sources (for the fact-checker):
   35B on a 10 GB GPU with --ram 8: short with RAM alone, fits with --disk (tests/unit/offload_disk_plan_test.js)
 - Qwen3.8 Flash: README "Qwen3.8 Flash (experimental)" (125B / 6B active, speeds, 64K, 128K in progress, CLI from the repo); room/models.js
   FLASH_CTX_PROVEN / FLASH_CTX_OPTIONS (8K/32K/64K picker, default 64K); README research section (17% of experts serve ~77% of lookups);
-  video public/media/flash-demo.mp4 (recorded 2026-10-13, 2:13, captions.srt: alone ~6 words/s, + PC ~9 words/s, 1.4x)
+  video public/media/flash-demo.mp4 (recorded 2026-10-13, 2:02 voiced cut starting at the home page, captions.srt: alone ~6 words/s, + PC ~9 words/s, 1.4x)
 */}
 
 Pick by how much memory the room has. The header shows it as `N GB pooled`, and the picker preselects the biggest model that fits.
@@ -55,7 +55,7 @@ Phones add little memory: 0.5 to 2 GB each. See [Phones and tablets](/docs/phone
   <source src="/docs/media/flash-demo.mp4" type="video/mp4" />
 </video>
 
-*Recorded October 13, 2026 (2:13, subtitles): Qwen3.8 Flash in a Chrome tab on a Mac Studio, then an RTX 5070 PC joins the room and it gets 1.4x faster.*
+*Recorded October 13, 2026 (2:02, voice and subtitles): Qwen3.8 Flash in a Chrome tab on a Mac Studio, then an RTX 5070 PC joins the room and it gets 1.4x faster.*
 
 Qwen3.8 Flash is a 125B mixture-of-experts model that uses about 6B of its parameters per token. It is far bigger than most GPUs' memory, so Pooled runs it from disk:
 
