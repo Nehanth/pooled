@@ -145,6 +145,22 @@ More in [docs/architecture.md](docs/architecture.md).
 
 All numbers use greedy decoding, and the output matches plain one-device decoding. Full history, with commits and caveats, is in [docs/bench-log.md](docs/bench-log.md).
 
+### From disk: Qwen3.8 Flash (experimental)
+
+A Mac Studio running Flash in a Chrome tab, lending 20 GB of GPU memory and reading the rest of the experts from its SSD, then an RTX 5070 PC joining the room with `pooled join` (10 GB of GPU memory, most of its experts parked in RAM). Both on WiFi, October 13-14, 2026. Answers match llama.cpp's greedy output on the golden prompts, exactly or at near ties within the test's rule.
+
+| Setup | Decode | 8K-token prompt read | 32K-token prompt read |
+|---|---|---|---|
+| Mac Studio alone | ~8 tok/s | 45.7 s | |
+| Mac Studio + RTX 5070 PC | 10-12 tok/s (9.4 median on one WiFi night) | 35.9 s | 82 s |
+
+- A short question gets its first token in about 5 s on the Mac alone.
+- Decode is slower at long context: with the room open at 64K, about 5 tok/s on the Mac alone and 6-7 on the pair. The context's memory comes out of the GPU's expert cache, so more experts come from disk.
+- The expert cache works because routing repeats: on recorded traces, caching 17% of a layer's experts serves about 77% of lookups.
+- WiFi stalls make single answers vary; a wired link is steadier.
+
+Details: [docs/long-context-and-sessions.md](docs/long-context-and-sessions.md), [docs/bench-log.md](docs/bench-log.md). Demo: [SSD demo video](https://pooled.run/docs/media/flash-demo.mp4).
+
 ### One device
 
 NVIDIA GB10 (DGX Spark), Chrome, 2026-09-26, coding prompts, speculative decoding with the model's own draft layer.
@@ -179,22 +195,6 @@ Same GB10, 2026-09-27. Each device is its own headless Chromium with real WebRTC
 
 Caveats: loopback has no bandwidth limit, loss or jitter, and only model-data frames are delayed. All devices share one GPU, so their compute never overlaps, which makes the 0 ms rows pessimistic compared with separate machines. Harness: [tests/e2e/room_latency.mjs](tests/e2e/room_latency.mjs).
 
-
-### From disk: Qwen3.8 Flash (experimental)
-
-A Mac Studio running Flash in a Chrome tab, lending 20 GB of GPU memory and reading the rest of the experts from its SSD, then an RTX 5070 PC joining the room with `pooled join` (10 GB of GPU memory, most of its experts parked in RAM). Both on WiFi, October 13-14, 2026. Answers match llama.cpp's greedy output on the golden prompts, exactly or at near ties within the test's rule.
-
-| Setup | Decode | 8K-token prompt read | 32K-token prompt read |
-|---|---|---|---|
-| Mac Studio alone | ~8 tok/s | 45.7 s | |
-| Mac Studio + RTX 5070 PC | 10-12 tok/s (9.4 median on one WiFi night) | 35.9 s | 82 s |
-
-- A short question gets its first token in about 5 s on the Mac alone.
-- Decode is slower at long context: with the room open at 64K, about 5 tok/s on the Mac alone and 6-7 on the pair. The context's memory comes out of the GPU's expert cache, so more experts come from disk.
-- The expert cache works because routing repeats: on recorded traces, caching 17% of a layer's experts serves about 77% of lookups.
-- WiFi stalls make single answers vary; a wired link is steadier.
-
-Details: [docs/long-context-and-sessions.md](docs/long-context-and-sessions.md), [docs/bench-log.md](docs/bench-log.md). Demo: [SSD demo video](https://pooled.run/docs/media/flash-demo.mp4).
 
 ## How it compares
 
