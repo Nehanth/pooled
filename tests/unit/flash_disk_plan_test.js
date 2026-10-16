@@ -152,8 +152,9 @@ Deno.test("tab disk consent: the answer is remembered per origin, ?tabdisk=0 say
 
 Deno.test("tab disk consent: a tab advertises the tier only as its user answered (ask until then, nothing after a no)", () => {
   const mac = { webgpu: true, phone: false };
-  eq(tabDiskMeta(mac, { opfs: true }), { ramGB: 3, models: [F], ask: true });
-  eq(tabDiskMeta(mac, { opfs: true, choice: "allow" }), { ramGB: 3, models: [F] });
+  // (4 GB by default: a 128K room's checkpoint copy on its way to OPFS fits, room/flashdisk.js TAB_RAM_GB)
+  eq(tabDiskMeta(mac, { opfs: true }), { ramGB: 4, models: [F], ask: true });
+  eq(tabDiskMeta(mac, { opfs: true, choice: "allow" }), { ramGB: 4, models: [F] });
   eq(tabDiskMeta(mac, { opfs: true, choice: "deny" }), null);
   eq(tabDiskMeta(mac, { opfs: false, choice: "allow" }), null, "no OPFS");
   eq(tabDiskMeta({ webgpu: true, phone: true }, { opfs: true, choice: "allow" }), null, "phones never");

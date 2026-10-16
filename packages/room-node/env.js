@@ -122,6 +122,9 @@ export async function probeMeta(pledgeGB, { gbps = null, ramGB = 0, mem = null, 
     meta.maxBindMB = Math.floor(Math.min(a.limits.maxStorageBufferBindingSize, a.limits.maxBufferSize) / 2 ** 20);
     // flashLong: this node loads Qwen3.8-Flash-Next with QSA when the host asks (ai-load.flash; room/models.js flashLongMeta)
     meta.flashLong = flashLongMeta(meta.maxBindMB, { batch: flashBatchMode() !== "off" });
+    // POOLED_FLASH_KV=f32 (a test switch): this node says it loads f32 K / V only, so its rooms run f32 (the gates
+    // compare an f16 room with the same room in f32)
+    if (process.env.POOLED_FLASH_KV === "f32") { meta.flashLong.kv = ["f32"]; delete meta.flashLong.ctx16; }
     meta.gbps = gbps != null ? Math.max(0, +gbps || 0) : await measureCopyGBps(a);
   }
   meta.phone = false;

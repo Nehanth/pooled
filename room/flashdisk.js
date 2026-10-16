@@ -36,9 +36,12 @@ const G_ = /** @type {any} */ (globalThis);
 
 // localStorage key of this origin's answer ("allow" | "deny")
 export const TAB_DISK_KEY = "pooled-tabdisk";
-// the models a tab's disk tier serves, and the RAM it offers by default for the tier's spare and T1 (?tabram=G)
+// the models a tab's disk tier serves, and the RAM it offers by default for the tier's spare and T1 (?tabram=G). 4 GB
+// (was 3) so a tab holds a 128K room: its spare keeps one checkpoint's copy on its way to OPFS, the state of its layers
+// at the room's context (room/plan.js offloadSpare: ~1.6 GB for 24 layers at 128K in f16), on top of the process's 1.5
+const TAB_RAM_DEFAULT_GB = 4;
 export const TAB_DISK_MODELS = ["qwen3.8-flash"];
-export const TAB_RAM_GB = 3;
+export const TAB_RAM_GB = TAB_RAM_DEFAULT_GB;
 // This tab's answer: "allow", "deny" or null (not asked yet). ?tabdisk=0 says no for this page only (a kiosk, a test);
 // the URL can never say yes: room links (/r/:code, the invite) keep their query, so a host could hand out one that
 // skips the question. Only the user's own answer (stored, or the dialog) allows. storage: localStorage, or null

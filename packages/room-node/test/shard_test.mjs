@@ -32,7 +32,7 @@ test("loadShard refuses a NaN range before it asks for a GPU", async () => {
 test("loadShard refuses a Flash format it can't load before it asks for a GPU or streams", async () => {
   const src = { M: { kind: "qwen4exp" }, header: () => { throw new Error("streamed"); } };
   await assert.rejects(loadShard({ modelKey: "qwen3.8-flash", range: [0, 4], hasEmbed: true, hasHead: false, src, selfTest: false,
-    flash: { qsa: 1, kv: "f16", ring: 1024 } }), /f32 only/);
+    flash: { qsa: 1, kv: "q8", ring: 1024 } }), /f32 or f16/);
 });
 
 // ---------------- Qwen3.8-Flash-Next (qwen4exp): the real files' headers (tests/fixtures/q38flash), no weights ----------------

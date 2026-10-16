@@ -766,7 +766,17 @@
   #ai-start:disabled { box-shadow: none; }
   #ai-need { width: 100%; display: flex; flex-direction: column; gap: 7px; }
   #ai-panel.loading :is(#ai-model, #ai-start, #ai-need, #ai-ladder),
-  #ai-panel.online :is(#ai-model, #ai-start, #ai-need, #ai-ladder, #ai-status) { display: none; }
+  #ai-panel.online :is(#ai-model, #ai-start, #ai-need, #ai-ladder, #ai-status, #ai-ctx) { display: none; }
+  #ai-panel.loading #ai-ctx { display: none; }
+  /* the context choice (Qwen3.8 Flash): a short row of lengths under the model rows, each with its need and read time */
+  #ai-ctx { display: flex; flex-direction: column; gap: 6px; margin: -2px 0 10px; }
+  #ai-ctx > p { font-size: 12px; color: var(--muted); margin: 0 4px; }
+  #ai-ctx .cx { display: grid; grid-template-columns: repeat(auto-fit, minmax(84px, 1fr)); gap: 6px; }
+  #ai-ctx button { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; min-height: 52px; padding: 7px 10px; font: 500 14px/1.1 var(--sans); color: var(--text); background: var(--panel); border: 1px solid var(--rule-2); border-radius: 10px; text-align: left; }
+  #ai-ctx button small { font: 400 11px/1.25 var(--mono); color: var(--muted); }
+  #ai-ctx button.sel { border-color: var(--accent); background: var(--accent-soft); }
+  #ai-ctx button:disabled { color: var(--ink-4); }
+  #ai-ctx button:disabled small { color: var(--ink-3); }
   #need-bar { height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden; }
   #need-fill { height: 100%; width: 0%; background: var(--faint); border-radius: 3px; transition: width 0.9s var(--ease), background 0.4s; }
   #ai-need.ok #need-fill { background: var(--accent); }
@@ -1982,6 +1992,10 @@
             <div class="seg" data-for="ai-split" role="radiogroup" aria-labelledby="l-split"></div>
             <select id="ai-split" class="seg-src" aria-labelledby="l-split" tabindex="-1"><option value="memory">by memory (every device holds some)</option><option value="speed" selected>for speed (fastest devices, fewest hops)</option></select>
           </div>
+          <div class="set" id="set-ctx" hidden>
+            <div class="set-l"><b id="l-ctx">Context length</b><span>How much text Qwen3.8 Flash reads at once. Changing it while the model runs loads it again on every device.</span></div>
+            <select id="ai-ctx-set" aria-labelledby="l-ctx"></select>
+          </div>
           <div class="set set-row">
             <div class="set-l"><b id="l-autoadd">Add devices that join</b><span>A device that joins while the model runs is added to it when the room is free: each device loads its part again (about a minute or two), and the chat stays.</span></div>
             <label class="switch"><input type="checkbox" id="ai-autoadd" role="switch" aria-labelledby="l-autoadd" checked><i aria-hidden="true"></i></label>
@@ -2089,6 +2103,7 @@
             <div id="need-text"></div>
           </div>
           <div id="ai-ladder" role="radiogroup" aria-label="Model"></div>
+          <div id="ai-ctx" hidden></div>
           <span id="ai-status"></span>
           <p class="ap-note" id="ap-note">Each device downloads only its own layers, once. They stay cached for next time.</p>
           <div class="ai-go"><button id="ai-start" class="primary">Start the model</button></div>

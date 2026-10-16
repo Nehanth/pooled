@@ -48,9 +48,10 @@ const long = (budget) => chat("Here are some design notes.\n\n" + doc(budget) + 
 // the 16K / 32K cases need more text than roadmap/ holds (~30K tokens): roadmap/*.md then docs/*.md, each in name order
 const docLong = (budget, needle = null, needleAt = 0) => {
   const lines = [];
-  for (const d of ["roadmap", "docs"]) {
+  // (64K / 128K need more: docs/archive, docs/research and the docs site after them; the shorter cases' text is unchanged)
+  for (const d of ["roadmap", "docs", "docs/archive", "docs/research", "docs-site/src/content/docs"]) {
     const dir = new URL(`../../${d}/`, import.meta.url);
-    const names = [...Deno.readDirSync(dir)].map((e) => e.name).filter((n) => n.endsWith(".md")).sort();
+    const names = [...Deno.readDirSync(dir)].map((e) => e.name).filter((n) => n.endsWith(".md") || n.endsWith(".mdx")).sort();
     for (const n of names) lines.push(...Deno.readTextFileSync(new URL(n, dir)).split("\n"));
   }
   let text = "", n = 0, planted = needle === null;
@@ -80,6 +81,13 @@ cases["ctx2k1"] = () => ({ q: "roadmap notes (~2.1K tokens, just past 2051 cells
 cases["ctx16k"] = () => ({ q: "roadmap + docs notes (~16K tokens), which note is about disk", prompt: longer(15900) });
 cases["ctx32k"] = () => ({ q: "roadmap + docs notes (~32K tokens), which note is about disk", prompt: longer(32300) });
 cases["needle30k"] = () => ({ q: `needle: "${NEEDLE.sentence}" planted ~2.5K tokens into ~30K tokens of notes, asked at the end`, prompt: needle(30000, 2500), needle: NEEDLE.pass });
+// rooms at 64K / 128K (rooms long-context PR 5): prompt + 64 ids within the room's context; a needle ~8K tokens into
+// ~120K. Need -c >= 131584
+const NEEDLE2 = { pass: "cobalt-heron-8830", sentence: "Note for whoever reads this far: the passphrase for the demo room is cobalt-heron-8830. Keep it in mind." };
+const needle2 = (budget, at) => chat("Here are some design notes.\n\n" + docLong(budget, NEEDLE2.sentence, at) + "\nSomewhere in these notes there is a passphrase for the demo room. What is it? Reply with the passphrase, then one sentence on where in the notes it appeared.");
+cases["ctx64k"] = () => ({ q: "roadmap + docs notes (~64K tokens), which note is about disk", prompt: longer(65300) });
+cases["ctx128k"] = () => ({ q: "roadmap + docs notes (~128K tokens), which note is about disk", prompt: longer(130800) });
+cases["needle120k"] = () => ({ q: `needle: "${NEEDLE2.sentence}" planted ~8K tokens into ~120K tokens of notes, asked at the end`, prompt: needle2(120000, 8000), needle: NEEDLE2.pass });
 const picked = Object.keys(cases).filter((name) => !ONLY || ONLY.includes(name));
 
 const p = new URL("./q38flash_llama_greedy.json", import.meta.url);
