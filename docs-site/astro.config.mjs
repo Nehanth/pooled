@@ -44,7 +44,7 @@ export default defineConfig({
 		repoLinks,
 		starlight({
 			title: 'Pooled docs',
-			description: 'Peer-to-peer LLM inference in the browser. Pool your devices to run big open models, for chat and coding agents. Even models too big for your computer run from its disk.',
+			description: 'Peer-to-peer LLM inference in the browser. Pool your devices to run big open models, for chat and coding agents.',
 			favicon: '/favicon.svg',
 			logo: { light: './src/assets/wordmark-light.svg', dark: './src/assets/wordmark-dark.svg', replacesTitle: true },
 			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/Nehanth/pooled' }],
