@@ -50,7 +50,8 @@ import { unpackWire, wireStats } from "../../room/wire.js";
 import { TeleMeter, expertStoreOf } from "../../room/tele.js";
 import { isPhoneMeta, roomFit, dealRoom, shortNote, specWithOffload, dealOffloads, parseForce, layersTotal } from "../../room/plan.js";
 import { verifyHost, hostAllowed, startBusy, startFrom, joinOrder, START_PENDING_MS } from "../../room/authz.js";
-import { flashRoomLimits, ckptSlotsAt, MODELS, CTX, roomBytes, maxSeqFor, ctxForBinding, kvModeFor, kvForLoad, kvBytesPerLayerPos, MAX_NEW, MIN_ROOM, pickCtx, ctxShortNote, expertsOf, ngramOf, flashLayerCost,
+import { roomCtxPlan, hostMarginFor } from "../../room/ctxpick.js";
+import { flashRoomLimits, ckptSlotsAt, MODELS, CTX, roomBytes, maxSeqFor, ctxTop, ctxForBinding, kvModeFor, kvForLoad, kvBytesPerLayerPos, MAX_NEW, MIN_ROOM, pickCtx, ctxShortNote, expertsOf, ngramOf, flashLayerCost,
   flashRoomFormat, flashReadyFields, readyCtxShort, flashDealReserve } from "../../room/models.js";
 import { CkptIndex, CKPT_DEFAULTS, boundaryPin, pinPoints, cutPoints, turnPoint } from "./ckpt.js";
 import { CkptDisk, modelFileId, prefixHash, roomKey } from "./ckptdisk.js";
@@ -101,7 +102,10 @@ const FROM_HOST = new Set(["ai-layers", "ai-ready-all", "ai-reset", "ai-redeal",
 // costs 1.8 GB more at 16k (5.6 GB in all); a room whose pledges hold it only at 8k opens it there
 // (room/models.js pickCtx, as the room page does), and --ctx 8192 asks for 8k. A model without a CTX
 // entry keeps the room's default. (qwen35: the deal lowers it to what every device can bind.)
-export const nodeCtxFor = (model, ask = 0) => (ask > 0 || !CTX[model] ? maxSeqFor(model, ask) : CTX[model].max);
+// The 27B and the MoE have a ladder (room/models.js CTX): this is its top, and the room walks it down to the longest step
+// its devices hold, past the model's default (32K MoE, 16K 27B) only at full speed (room/ctxpick.js roomCtxPlan, as the
+// room page).
+export const nodeCtxFor = (model, ask = 0) => (ask > 0 || !CTX[model] ? maxSeqFor(model, ask) : ctxTop(model));
 // what a host that closes its room says to the devices in it (bye {closed: 1})
 export const HOST_CLOSED = "The host closed the room.";
 export const cleanName = (s, id) => String(s ?? id).replace(/[\u0000-\u001f\u007f<>"'`&]/g, "").trim().slice(0, 40) || String(id).slice(0, 8);
@@ -1048,15 +1052,16 @@ export class RoomNode extends EventEmitter {
   // --ctx stays. -> { ctx, want, fits, fellBack, note } (note: what the room says when it fell back)
   // (Qwen3.8-Flash-Next: within the room's K / V format and the longest context its devices take, room/models.js
   // flashRoomLimits, as the room page's roomCtxPlan; fkv: that format, for the deal's sizes)
+  // One plan with the room page (room/ctxpick.js roomCtxPlan): a model with a ladder (the 27B, the MoE, Flash) opens at its
+  // longest step these pledges hold, past its default only at full speed; want: the longest the room may take (nodeCtxFor,
+  // held to the devices' binding limit: ctxForDevices)
   static ctxPick(modelKey, { want, ask = 0, kv = "f16", self, peers = [], shareCap = new Map() }) {
     const pl = [self, ...peers].map((d) => dealPledgeBytes(d.meta, shareCap.get(d.name), modelKey));
-    const metas = [self, ...peers].map((d) => d.meta), lim = flashRoomLimits(modelKey, metas);
-    const fkv = lim.kv || (kv === "q8" ? "q8" : "f16");
-    const pick = pickCtx(modelKey, { want, ask, cap: lim.cap, fitsAt: (c) => {
-      const rb = roomBytes(modelKey, c, fkv);
-      return !rb || roomFit(rb.L, pl, rb.layerCost || rb.layerBytes, rb.hostBytes, offloadFor(metas, rb.experts || rb.expertBytes, modelKey)).fits;
-    } });
-    return { ...pick, fkv, note: pick.fellBack ? ctxShortNote(String(MODELS[modelKey]?.label || modelKey).split("·")[0].trim(), pick.ctx, pick.want) : "" };
+    const metas = [self, ...peers].map((d) => d.meta);
+    if (!roomBytes(modelKey, want, kv)) return { ctx: want, want, fits: true, fellBack: false, fkv: kv === "q8" ? "q8" : "f16", note: "" };
+    const plan = roomCtxPlan(modelKey, { metas, pledges: pl, ask, kvAsk: kv === "q8" ? "q8" : null, margin: hostMarginFor(modelKey, self.meta), cap: want });
+    const { ctx, want: w, fits, fellBack } = plan;
+    return { ctx, want: w, fits, fellBack, fkv: plan.kv, note: fellBack ? ctxShortNote(String(MODELS[modelKey]?.label || modelKey).split("·")[0].trim(), ctx, w) : "" };
   }
   setSplit(mode) { this.splitMode = mode === "speed" ? "speed" : "memory"; }
   // the checkpoint slots this room keeps: --ckpt's, held to the deal's reserve in a long Flash room (ai.ckptLimit)

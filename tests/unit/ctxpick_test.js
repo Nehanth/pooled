@@ -125,3 +125,109 @@ Deno.test("ctxpick: the demo room (Mac tab 22 + PC 12) holds 128K by the memory 
   const old = [tab(22, { tabDisk: { ramGB: 3, models: [F] } }), metas[1]];
   ok(!fitAtCtx(F, { c: 131072, kv: "f16", pledges, metas: old, costs: roomCosts(F), margin: hostMarginFor(F, old[0]) }).fit.fits);
 });
+
+// ---- the 27B and the 35B MoE: a ladder too (room/models.js CTX ladder / options), the default past CTX def only at full speed
+import { SHAPE, roomBytes, kvBytesPerLayerPos, hostHeldBytes, ctxTop, NEED_GB, NEED_MIN_GB, needText } from "../../room/models.js";
+import { isPhoneMeta } from "../../room/plan.js";
+const Q35 = ["qwen3.8-27b", "qwen3.6-35b-moe"];
+// Start's costs for a Qwen 3.5 model, as room.js aiStart builds them from the header (layers 0-3's average weights plus
+// the attention layers' K / V at the context, kvBytesPerLayerPos on the header's meta; the embedding, the head and the
+// draft block on the host): here from SHAPE's header numbers and a meta with the model's attention shape
+const qMeta = (m) => ({ "qwen35.attention.head_count_kv": m === "qwen3.8-27b" ? 4 : 2, "qwen35.attention.key_length": 256, "qwen35.full_attention_interval": 4 });
+const q35Start = (m) => {
+  const s = SHAPE[m], host = hostHeldBytes("qwen35", { embed: s.embed, out: s.out, mtp: s.mtp }), ex = roomBytes(m, 8192).experts;
+  return (c, kv) => ({ L: s.L, layers: s.layer + c * kvBytesPerLayerPos(qMeta(m), kv), hostBytes: host, experts: ex });
+};
+const t = (gb, x = {}) => ({ webgpu: true, contribGB: gb, ...x });
+const iphone = () => ({ webgpu: true, contribGB: 1, ua: "iPhone" });
+const rtx = (gb, ram) => ({ webgpu: true, contribGB: gb, native: "node-dawn", ...(ram ? { offload: true, ramGB: ram } : {}) });
+const QROOMS = {
+  "Mac 16 + desktop 7 + iPhone (24 GB)": [t(16), t(7), iphone()],
+  "Mac 17 + desktop 6 + iPhone (24 GB)": [t(17), t(6), iphone()],
+  "Mac 14 + desktop 8 + iPhone (23 GB)": [t(14), t(8), iphone()],
+  "Mac 18 + desktop 4 (22 GB)": [t(18), t(4)],
+  "two 16 GB laptops": [t(16), t(16)],
+  "a GB10 lending 40": [rtx(40)],
+  "an RTX 12 GB with 48 GB of RAM": [rtx(12, 48)],
+  "an RTX 12 GB with RAM + a Mac 12": [rtx(12, 48), t(12)],
+  "a 16 GB laptop alone": [t(16)],
+  "a 20 GB laptop alone": [t(20)],
+};
+const qPledges = (metas, m) => metas.map((x) => dealPledgeBytes(x, Infinity, m));
+
+Deno.test("ctxpick (27B, MoE): the picker and Start pick the same context and fit, for every room and every choice", () => {
+  eq(CTX["qwen3.8-27b"].options, [8192, 16384, 32768, 65536]);
+  eq(CTX["qwen3.6-35b-moe"].options, [8192, 32768, 65536, 131072]);
+  for (const m of Q35) for (const [name, metas] of Object.entries(QROOMS)) for (const choice of [0, ...CTX[m].options]) {
+    const pledges = qPledges(metas, m), at = `${m}, ${name}, choice ${choice}`;
+    const picker = roomCtxPlan(m, { metas, pledges, choice }), start = roomCtxPlan(m, { metas, pledges, choice, costs: q35Start(m) });
+    eq([start.ctx, start.want, start.kv, start.fits, start.fellBack], [picker.ctx, picker.want, picker.kv, picker.fits, picker.fellBack], at);
+    ok(CTX[m].ladder.includes(picker.ctx), `${at}: ${picker.ctx} is on the ladder`);
+    if (choice) ok(picker.ctx <= choice, `${at}: never past the choice`);
+    const pf = picker.fitAt(picker.ctx).fit, sf = start.fitAt(start.ctx).fit;
+    eq([sf.fits, sf.caps, !!sf.offload], [pf.fits, pf.caps, !!pf.offload], `${at}: the fit`);
+    const need = (p) => minFitPledge(pledges, (pl) => !!p.fitAt(p.ctx, pl).fit.fits);
+    const np = need(picker), ns = need(start);
+    eq(np && gbUp(np.bytes), ns && gbUp(ns.bytes), `${at}: the need`);
+    if (pf.fits) {
+      const d = start.fitAt(start.ctx, pledges, { mode: "memory", phone: metas.map(isPhoneMeta) }).deal;
+      ok(d.fit.fits, `${at}: Start's deal fits`);
+      d.used.forEach((i, k) => ok(d.held[k] <= pledges[i] + 1, `${at}: device ${i} holds ${d.held[k] / GB} of ${pledges[i] / GB}`));
+    }
+  }
+});
+
+Deno.test("ctxpick (27B, MoE): each context choice's need is Start's at that choice; one that fits is where Start opens", () => {
+  for (const m of Q35) for (const [name, metas] of Object.entries(QROOMS)) {
+    const pledges = qPledges(metas, m), opts = ctxOptions(m, { metas, pledges });
+    eq(opts.map((o) => o.ctx), CTX[m].options, name);
+    for (const o of opts) {
+      const s = roomCtxPlan(m, { metas, pledges, choice: o.ctx, costs: q35Start(m) });
+      const mm = minFitPledge(pledges, (pl) => !!fitAtCtx(m, { c: o.ctx, kv: s.kv, pledges: pl, metas, costs: q35Start(m) }).fit.fits);
+      eq(o.needGB, mm ? gbUp(mm.bytes) : null, `${m} ${name} ${o.label}: need`);
+      ok(!o.capped, `${m} ${name} ${o.label}: no device caps a qwen35 room in the picker`);
+      if (o.fits) eq(s.ctx, o.ctx, `${m} ${name} ${o.label}: Start opens there`);
+      else ok(!s.fits || s.ctx < o.ctx, `${m} ${name} ${o.label}`);
+    }
+  }
+});
+
+Deno.test("ctxpick (27B, MoE): no choice opens at the longest step held at full speed, never below where rooms opened before", () => {
+  const plan = (m, name) => { const metas = QROOMS[name]; return roomCtxPlan(m, { metas, pledges: qPledges(metas, m) }); };
+  const M = "qwen3.6-35b-moe", D = "qwen3.8-27b";
+  eq([ctxTop(M), ctxTop(D), maxSeqFor(M), maxSeqFor(D)], [131072, 65536, 32768, 16384]);
+  // Mac + desktop + iPhone, 24 GB: the computers hold the MoE at 128K (the phone stays out), so it opens there
+  const a = plan(M, "Mac 16 + desktop 7 + iPhone (24 GB)");
+  eq([a.ctx, a.fits, a.fellBack, a.want], [131072, true, false, 32768]);
+  eq(a.fitAt(a.ctx, qPledges(QROOMS["Mac 16 + desktop 7 + iPhone (24 GB)"], M), { phone: [false, false, true] }).deal.used, [0, 1]);
+  // the same 24 GB split 17 / 6: 128K would need the phone to hold layers (a slow hop every token): 64K, 128K a click away
+  const b = plan(M, "Mac 17 + desktop 6 + iPhone (24 GB)");
+  eq([b.ctx, b.fellBack], [65536, false]);
+  const bm = QROOMS["Mac 17 + desktop 6 + iPhone (24 GB)"], b128 = roomCtxPlan(M, { metas: bm, pledges: qPledges(bm, M), choice: 131072 });
+  eq(b128.ctx, 131072, "chosen in the picker: 128K");
+  ok(b128.fitAt(131072, qPledges(bm, M), { phone: bm.map(isPhoneMeta) }).deal.used.includes(2), "with the phone holding layers");
+  // a GPU that holds the MoE only with experts in RAM keeps the default: a longer context would take expert cache
+  const o = plan(M, "an RTX 12 GB with 48 GB of RAM");
+  eq([o.ctx, o.fits, !!o.fitAt(o.ctx).fit.offload], [32768, true, true]);
+  // the 27B: 64K wherever the same devices hold it; a 16 GB laptop alone holds no step (17 GB at 16K, 16.5 at 8K)
+  eq(plan(D, "Mac 16 + desktop 7 + iPhone (24 GB)").ctx, 65536);
+  eq(plan(D, "a 20 GB laptop alone").ctx, 65536);
+  const lone = plan(D, "a 16 GB laptop alone");
+  eq([lone.ctx, lone.fits], [8192, false], "short everywhere: short for the ladder's last step");
+  // every room: where it opened before the ladder (CTX def), it opens at that or longer, the same fit
+  for (const m of Q35) for (const [name, metas] of Object.entries(QROOMS)) {
+    const pledges = qPledges(metas, m), p = roomCtxPlan(m, { metas, pledges });
+    const before = p.fitAt(CTX[m].def).fit;
+    if (before.fits) ok(p.fits && p.ctx >= CTX[m].def && !p.fellBack, `${m} ${name}: ${p.ctx}`);
+    // past the default only with every expert on a GPU and no more devices than at the default
+    if (p.ctx > CTX[m].def) {
+      const used = (c) => p.fitAt(c, pledges, { phone: metas.map(isPhoneMeta) }).deal;
+      ok(!used(p.ctx).fit.offload && used(p.ctx).used.length <= used(CTX[m].def).used.length, `${m} ${name}`);
+    }
+  }
+  // ?ctx= stays as asked (tried alone)
+  eq(roomCtxPlan(M, { metas: QROOMS["a 16 GB laptop alone"], pledges: qPledges(QROOMS["a 16 GB laptop alone"], M), ask: 131072 }).ctx, 131072);
+  // the picker's need words: the default's need, and the ladder's last step's
+  eq(needText(D), `${NEED_GB[D]} GB (${NEED_MIN_GB[D]} GB at 8K)`);
+  ok(NEED_MIN_GB[M] < NEED_GB[M]);
+});

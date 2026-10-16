@@ -128,7 +128,7 @@ Sources (for the fact-checker):
 - After step 7: `● online` at the top and `room online: spark-host 0-21 · spark-join 22-39` in the log, about a minute after Enter when the model is on disk (63 seconds in our test: each computer loads its part of the 19.4 GB file).
 - After step 8: an answer, then a line like `74 tokens · 46 tok/s · first token 0.4s`.
 
-What a model **needs** grows with the room's context. `pooled host` opens each model at its longest room context: 128k on the MoE, which needs 23 GB, and 16k on the 1.7B, which an agent such as OpenClaw needs. The 1.7B needs 5.5 GB at 16k, shown as `needs 6 GB (4 GB at 8K)`. When the room has less, `pooled host` opens it with an 8k context instead and says so: `Qwen3 1.7B · 8K context: the room's memory is short for 16K`. `--ctx 16384` or `--ctx 8192` takes that context and no other.
+What a model **needs** grows with the room's context. `pooled host` opens the 27B and the MoE at the longest context the room holds without slowing down: up to 64k on the 27B and 128k on the MoE (the MoE needs 21 GB at its 32k default, 23 GB at 128k), down to 8k when the room is short. It opens the 1.7B at 16k, which an agent such as OpenClaw needs. The 1.7B needs 5.5 GB at 16k, shown as `needs 6 GB (4 GB at 8K)`. When the room has less, `pooled host` opens it with an 8k context instead and says so: `Qwen3 1.7B · 8K context: the room's memory is short for 16K`. `--ctx 16384` or `--ctx 8192` takes that context and no other.
 
 ## Chat from anywhere
 

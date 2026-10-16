@@ -475,8 +475,18 @@ test("ctxPick: the 1.7B at 16k when the pledges hold it, 8k when they are short 
   const asked = RoomNode.ctxPick("qwen3-1.7b", { want: nodeCtxFor("qwen3-1.7b", 16384), ask: 16384, self: self(4) });
   assert.deepEqual([asked.ctx, asked.fits, asked.fellBack], [16384, false, false]);
   assert.deepEqual([RoomNode.ctxPick("qwen3-1.7b", { want, self: self(3) }).ctx, RoomNode.ctxPick("qwen3-1.7b", { want, self: self(3) }).fits], [8192, false]);
-  // the MoE has no fallback: its context stays
-  assert.equal(RoomNode.ctxPick("qwen3.6-35b-moe", { want: 131072, self: self(4) }).ctx, 131072);
+  // the MoE's ladder (room/models.js CTX, room/ctxpick.js roomCtxPlan): the longest step the pledges hold, past its 32k
+  // default only at full speed; short everywhere: short for its last step (8k)
+  const moe = (gb, extra = {}) => RoomNode.ctxPick("qwen3.6-35b-moe", { want: nodeCtxFor("qwen3.6-35b-moe"), self: { name: "pc", meta: { contribGB: gb, native: "node-dawn", ...extra } } });
+  assert.equal(nodeCtxFor("qwen3.6-35b-moe"), 131072);
+  assert.deepEqual([moe(4).ctx, moe(4).fits, moe(4).fellBack], [8192, false, false]);
+  assert.deepEqual([moe(21).ctx, moe(21).fits, moe(21).fellBack, moe(21).note], [32768, true, false, ""], "21 GB: the default");
+  assert.equal(moe(22).ctx, 65536, "22 GB: 64k");
+  assert.equal(moe(24).ctx, 131072, "24 GB: 128k");
+  // a GPU that holds the MoE only with experts in RAM keeps the default: a longer context would take expert cache
+  assert.equal(moe(16, { offload: true, ramGB: 64 }).ctx, 32768);
+  // --ctx 131072 stays as asked
+  assert.equal(RoomNode.ctxPick("qwen3.6-35b-moe", { want: 131072, ask: 131072, self: self(16) }).ctx, 131072);
 });
 
 test("close() on a host tells the room it is over (bye closed, then leaving); a device told so stops waiting for it", async () => {

@@ -27,7 +27,8 @@ let t0 = performance.now();
 const experts = await offloadFromEnv(device, L, model);
 const weights = BIG ? await streamWeights(model, device, { lo: 0, hi: L, hasEmbed: true, hasHead: true, mtp: hasMtp, experts }, (i) => { if (i % 8 === 7) console.log(`  layer ${i + 1}/${L} on the GPU, ${((performance.now() - t0) / 1000).toFixed(0)} s`); })
   : await model.weights({ lo: 0, hi: L, hasEmbed: true, hasHead: true, mtp: hasMtp, experts });
-const eng = await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: 512,
+// CTX=N: the engine's context (maxSeq; default 512): CTX=131072 checks the goldens in an engine sized as a 128K room's
+const eng = await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: +(Deno.env.get("CTX") || 512),
   // DRAFTCHAIN=0 / SPECFUSE=0: per-submit drafts / separate verify submits (A/B; same output)
   draftChain: Deno.env.get("DRAFTCHAIN") !== "0", specFuse: Deno.env.get("SPECFUSE") !== "0",
   moeNormRouter: Deno.env.get("MOE_NORM_ROUTER") !== "0",   // MOE_NORM_ROUTER=0: rmsnorm + router GEMV launches instead of moe_nrt (A/B)

@@ -32,12 +32,14 @@ Codex, Claude Code and opencode don't know how big a model called `pooled` is. W
 |---|---|---|---|---|
 | Qwen3 1.7B | 16384 | 13107 | 4096 | 4096 |
 | Qwen3 1.7B, room short of memory for 16K | 8192 | 6553 | 2048 | 2048 |
-| Qwen3.8 27B | 16384 | 13107 | 4096 | 4096 |
-| Qwen3.8 27B, `?ctx=32768` | 32768 | 26214 | 8192 | 8192 |
-| Qwen3.6 35B MoE | 32768 | 26214 | 8192 | 8192 |
-| Qwen3.6 35B MoE, `?ctx=65536` | 65536 | 52428 | 16384 | 8192 |
+| Qwen3.8 27B at 16K | 16384 | 13107 | 4096 | 4096 |
+| Qwen3.8 27B at 32K | 32768 | 26214 | 8192 | 8192 |
+| Qwen3.8 27B at 64K | 65536 | 52428 | 16384 | 8192 |
+| Qwen3.6 35B MoE at 32K | 32768 | 26214 | 8192 | 8192 |
+| Qwen3.6 35B MoE at 64K | 65536 | 52428 | 16384 | 8192 |
+| Qwen3.6 35B MoE at 128K | 131072 | 104857 | 32000 | 8192 |
 
-The host sets the context with `?ctx=` on the room page before starting the model. Use the MoE or the 27B at 32K for agents. The 1.7B is too small.
+A room opens the 27B and the MoE at the longest context its memory holds (see [Longer context](/docs/models#longer-context)); the host can pick another in the picker's **Context** row or with `?ctx=` on the room page before starting the model. Use the MoE or the 27B at 32K or more for agents. The 1.7B is too small.
 
 ## Codex CLI
 

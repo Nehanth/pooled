@@ -472,7 +472,7 @@ async function runHost(opts, out, prepared = null) {
   // --here: lend what the model needs on this computer alone and start; --pool: spread over the room
   if (opts.mode === "here") {
     const { hereGB, hereWhy, modelNeedGB, modelFallback } = await import("./hostui.js");
-    const lib = { MODELS: rn.MODELS, NEED_GB: rn.NEED_GB, roomBytes: rn.roomBytes, roomFit: rn.roomFit, shortNote: rn.shortNote, shortBy: rn.shortBy, gbUp: rn.gbUp, pledgeGB: rn.pledgeGB, nodeCtxFor: rn.nodeCtxFor, pickCtx: rn.pickCtx, ctxShortNote: rn.ctxShortNote, offloadFor: rn.offloadFor };
+    const lib = { MODELS: rn.MODELS, NEED_GB: rn.NEED_GB, roomBytes: rn.roomBytes, roomFit: rn.roomFit, shortNote: rn.shortNote, shortBy: rn.shortBy, gbUp: rn.gbUp, pledgeGB: rn.pledgeGB, nodeCtxFor: rn.nodeCtxFor, pickCtx: rn.pickCtx, roomCtxPlan: rn.roomCtxPlan, maxSeqFor: rn.maxSeqFor, ctxShortNote: rn.ctxShortNote, offloadFor: rn.offloadFor };
     const max = Math.max(rule.gb, memoryRule(mem, { max: true }, { capGB: rn.maxPledgeGB(opts.model) }).gb || rule.gb);
     // a MoE model this GPU can't hold whole: with --ram (a discrete GPU's default), its experts in RAM, lending the rule's GB
     // --disk: the model's files will be here (pulled below), unless --no-pull streams a model that is not
@@ -598,7 +598,7 @@ async function runHost(opts, out, prepared = null) {
   // model, by the room page's math (room/plan.js roomFit); a terminal otherwise waits for Enter
   const auto = !tty || opts.start || opts.devices > 0;
   const lib = { MODELS: rn.MODELS, NEED_GB: rn.NEED_GB, roomBytes: rn.roomBytes, roomFit: rn.roomFit, shortNote: rn.shortNote, shortBy: rn.shortBy,
-    gbUp: rn.gbUp, pledgeGB: rn.pledgeGB, nodeCtxFor: rn.nodeCtxFor, pickCtx: rn.pickCtx, ctxShortNote: rn.ctxShortNote, offloadFor: rn.offloadFor };
+    gbUp: rn.gbUp, pledgeGB: rn.pledgeGB, nodeCtxFor: rn.nodeCtxFor, pickCtx: rn.pickCtx, roomCtxPlan: rn.roomCtxPlan, maxSeqFor: rn.maxSeqFor, ctxShortNote: rn.ctxShortNote, offloadFor: rn.offloadFor };
   let lastWhy = "";
   const maybeDeal = () => {
     if (!auto || starting || leaving || node.ai.engine || node.ai.starting) return;

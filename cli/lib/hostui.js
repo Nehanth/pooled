@@ -31,8 +31,10 @@ export function deviceKind(meta = {}, self = false) {
 // (roomBytes), else room/models.js NEED_GB for a model without a SHAPE
 // rounded up to a tenth of a GiB, as room/models.js NEED_GB (the room page's number for the same model)
 const needAt = (lib, key, ctx) => { const rb = lib.roomBytes(key, ctx, "f16"); return rb ? Math.ceil((rb.L * rb.layerBytes + rb.hostBytes) / GiB * 10 - 1e-9) / 10 : null; };
+// (without --ctx: at the model's default, CTX def, as the room page's NEED_GB: a model with a ladder opens longer only
+// when the room holds that at full speed, room/ctxpick.js roomCtxPlan)
 export function modelNeedGB(lib, key, ctxAsk = 0) {
-  return needAt(lib, key, lib.nodeCtxFor(key, ctxAsk)) ?? lib.NEED_GB[key] ?? null;
+  return needAt(lib, key, lib.maxSeqFor ? lib.maxSeqFor(key, ctxAsk) : lib.nodeCtxFor(key, ctxAsk)) ?? lib.NEED_GB[key] ?? null;
 }
 // The context a node falls back to for `key` when the room is short for its default (room/models.js
 // pickCtx: the 1.7B opens at 8K when 16K doesn't fit), and what the model needs there; null when it
@@ -41,7 +43,11 @@ export function modelFallback(lib, key, ctxAsk = 0) {
   if (!lib.pickCtx) return null;
   const want = lib.nodeCtxFor(key, ctxAsk);
   const p = lib.pickCtx(key, { want, ask: ctxAsk, fitsAt: () => false });
-  return p.ctx < want ? { ctx: p.ctx, needGB: needAt(lib, key, p.ctx) } : null;
+  if (!(p.ctx < want)) return null;
+  // (a fallback that saves under 1 GB is not worth a word: the 27B's and the MoE's 8K, ~0.5 GB under their default; the
+  // room still opens there when that is all it holds)
+  const needGB = needAt(lib, key, p.ctx), def = modelNeedGB(lib, key, ctxAsk);
+  return needGB != null && def != null && def - needGB < 1 ? null : { ctx: p.ctx, needGB };
 }
 const kOf = (n) => `${Math.round(n / 1024)}K`;
 // "6 GB" or "6 GB (4 GB at 8K)": a model's need in words, whole GB
@@ -74,11 +80,15 @@ export function roomFitNow(lib, { model, devices, ctxAsk = 0, spareGB = [] }) {
   }
   const off = (rb) => (lib.offloadFor ? lib.offloadFor(devices.map((d) => d.meta), rb.experts || rb.expertBytes || 0, model) : null);
   // (rb.layerCost: Qwen3.8-Flash-Next's per-layer bytes, room/models.js flashLayerCost, which roomFit takes in place of one size)
-  const fitAt = (c) => { const rb = lib.roomBytes(model, c, "f16"); return lib.roomFit(rb.L, pl.map((g) => g * GiB), rb.layerCost || rb.layerBytes, rb.hostBytes, off(rb)); };
-  const pick = lib.pickCtx ? lib.pickCtx(model, { want, ask: ctxAsk, fitsAt: (c) => fitAt(c).fits }) : { ctx: want, want, fellBack: false };
+  // (lib.roomCtxPlan: the room node's own plan, room/ctxpick.js, so the screen opens the room where Start will: the top of
+  // the model's ladder down to what fits, past its default only at full speed)
+  const plan = lib.roomCtxPlan ? lib.roomCtxPlan(model, { metas: devices.map((d) => d.meta), pledges: pl.map((g) => g * GiB), ask: ctxAsk }) : null;
+  const fitAt = plan ? (c) => plan.fitAt(c).fit
+    : (c) => { const rb = lib.roomBytes(model, c, "f16"); return lib.roomFit(rb.L, pl.map((g) => g * GiB), rb.layerCost || rb.layerBytes, rb.hostBytes, off(rb)); };
+  const pick = plan || (lib.pickCtx ? lib.pickCtx(model, { want, ask: ctxAsk, fitsAt: (c) => fitAt(c).fits }) : { ctx: want, want, fellBack: false });
   const fb = modelFallback(lib, model, ctxAsk);
-  const base = { needGB, minGB: fb?.needGB ?? null, haveGB, ctx: pick.ctx, want, fellBack: !!pick.fellBack,
-    ctxNote: pick.fellBack && lib.ctxShortNote ? lib.ctxShortNote(label, pick.ctx, want) : "" };
+  const base = { needGB, minGB: fb?.needGB ?? null, haveGB, ctx: pick.ctx, want: pick.want ?? want, fellBack: !!pick.fellBack,
+    ctxNote: pick.fellBack && lib.ctxShortNote ? lib.ctxShortNote(label, pick.ctx, pick.want ?? want) : "" };
   const fit = fitAt(pick.ctx);
   if (fit.fits) return { fits: true, ...base, shortGB: 0, note: "", offload: !!fit.offload, disk: !!fit.disk };
   const shortGB = lib.gbUp(lib.shortBy ? lib.shortBy(fit, spareGB) : fit.short);

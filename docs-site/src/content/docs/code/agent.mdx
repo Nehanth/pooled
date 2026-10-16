@@ -145,7 +145,7 @@ The agent's conversation must fit the model's context, less room for the next an
 | Qwen3.8 27B | 16,384 | about 12,220 |
 | Qwen3.6 35B MoE | 32,768 | about 24,510 |
 
-The meter next to **New task** shows how much of the context the conversation uses. A bigger `?ctx=` gives the agent more room; see [Pick a model](/docs/models).
+The meter next to **New task** shows how much of the context the conversation uses. A longer context gives the agent more room: the 27B and the MoE open at the longest the room holds, and the picker's **Context** row or `?ctx=` sets another; see [Longer context](/docs/models#longer-context).
 
 When the conversation grows past its budget, the agent shortens it to 60% of the budget, in this order:
 

@@ -25,10 +25,10 @@ Pooled ships no weights. Each device downloads only its share of the layers from
 | Model | Quantization | File | Memory the room needs | Context (default / max) |
 |---|---|---|---|---|
 | Qwen3 1.7B | Q8_0 | 1.83 GB | 4.0 GB | 8192 / 16384 |
-| Qwen 3.8 27B | Q4_0 | 16.06 GB | 17.0 GB | 16384 / 65536 |
-| Qwen 3.6 35B MoE (35B-A3B) | Q4_0 | 20.84 GB | 22.5 GB | 32768 / 131072 |
+| Qwen 3.8 27B | Q4_0 | 16.06 GB | 17.0 GB | 16384 / 65536 (opens up to 65536) |
+| Qwen 3.6 35B MoE (35B-A3B) | Q4_0 | 20.84 GB | 22.5 GB | 32768 / 131072 (opens up to 131072) |
 
-"Memory the room needs" is the total across all devices. Raise the context with [`?ctx=`](/docs/reference/url-options#context-per-model).
+"Memory the room needs" is the total across all devices, at the default context. The 27B and the MoE open longer when the room holds that at full speed: see [Longer context](/docs/models#longer-context). Ask for an exact length with [`?ctx=`](/docs/reference/url-options#context-per-model).
 
 ### What each one is
 

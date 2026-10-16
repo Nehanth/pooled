@@ -6,8 +6,8 @@ Pooled ships no weights. Browsers fetch tensors by HTTP range request from publi
 
 | Model | File | Engine | Notes |
 |---|---|---|---|
-| Qwen 3.8 27B | GGUF Q4_0 (~15 GB), includes the `nextn` draft layer | `Qwen35Engine` | 64 layers: 48 Gated DeltaNet + 16 attention; MTP speculation; 16K context by default, up to 64K |
-| Qwen 3.6 35B MoE (Qwen3.6-35B-A3B) | GGUF Q4_0 (bartowski) | `Qwen35Engine` (`qwen35moe`) | 256 experts, 8 active per token (~3B of 35B); router, experts and shared expert on the GPU; 32K context by default, up to 128K |
+| Qwen 3.8 27B | GGUF Q4_0 (~15 GB), includes the `nextn` draft layer | `Qwen35Engine` | 64 layers: 48 Gated DeltaNet + 16 attention; MTP speculation; a room opens it at the longest context it holds at full speed: 64K, 32K or 16K (8K when short), `?ctx=` up to 64K |
+| Qwen 3.6 35B MoE (Qwen3.6-35B-A3B) | GGUF Q4_0 (bartowski) | `Qwen35Engine` (`qwen35moe`) | 256 experts, 8 active per token (~3B of 35B); router, experts and shared expert on the GPU; a room opens it at the longest context it holds at full speed: 128K, 64K or 32K (16K or 8K when short), `?ctx=` up to 128K |
 | Qwen3.5-122B-A10B MoE | GGUF Q4_0 (bartowski, two files, 72.5 GB) | `Qwen35Engine` (`qwen35moe`) | **Developer only, hidden from users**: in the room page's `?dev=1` select and, with `POOLED_DEV=1`, in `pooled list` / `host` / `pull` (pull / rm take its full key without it); `tests/test_moe.js MODEL=122b`. 256 experts, 8 active (~10B of 122B); 32K context by default, up to 128K |
 | Qwen3.8 Flash Next (**experimental**) | GGUF Q4_0 (bartowski, three files, ~100.6 GB, of which a 28.8 GB n-gram table) | `Qwen4ExpEngine` (`engine/qwen4exp.js`, rooms via `room/flash.js`) | 125B, 512 experts, 10 active per token (~6B); most experts stay on disk and stream into a GPU cache (disk tier); context up to 64K, tested against llama.cpp; 128K in progress; from the command line, `@pooled/cli` 2.0.0+ ([cli/README.md](../cli/README.md#qwen38-flash-experimental-from-the-terminal)); in the room picker |
 | Qwen3 4B / 1.7B / 0.6B | GGUF Q4_0 / Q8_0 | `DenseEngine` | dense; 0.6B is the golden-test model |

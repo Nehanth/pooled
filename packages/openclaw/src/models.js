@@ -5,7 +5,8 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import os from "node:os";
-import { MODELS, FILES, NEED_GB, CTX, maxSeqFor, roomBytes, pickCtx, ctxShortNote, ctxK } from "../../../room/models.js";
+import { MODELS, FILES, NEED_GB, CTX, maxSeqFor, ctxTop, roomBytes, pickCtx, ctxShortNote, ctxK } from "../../../room/models.js";
+import { roomCtxPlan } from "../../../room/ctxpick.js";
 import { roomFit, shortNote, shortBy, gbUp } from "../../../room/plan.js";
 import { pledgeGB } from "../../../room/pledge.js";
 import { LOCAL } from "../../room-node/source.js";
@@ -37,19 +38,21 @@ export function recommendForOpenClaw(rows) {
   return row(OPENCLAW_MODEL) ? OPENCLAW_MODEL : recommendModel(rows);
 }
 
-// the context a node opens a room with (room-node roomnode.js nodeCtxFor): the qwen35 models' largest
-// (OpenClaw's prompts alone are 8-12k tokens), the room's default otherwise
-export const nodeCtxFor = (model, ask = 0) => (ask > 0 || MODELS[model]?.kind !== "qwen35" || !CTX[model] ? maxSeqFor(model, ask) : CTX[model].max);
-export const lib = { MODELS, FILES, NEED_GB, roomBytes, roomFit, shortNote, shortBy, gbUp, pledgeGB, nodeCtxFor, pickCtx, ctxShortNote };
+// the longest context a node opens a room with (room-node roomnode.js nodeCtxFor): the top of the qwen35 models' ladder
+// (64k on the 27B, 128k on the MoE; the room walks it down to what it holds at full speed, room/ctxpick.js roomCtxPlan;
+// OpenClaw's prompts alone are 8-12k tokens), the room's default otherwise
+export const nodeCtxFor = (model, ask = 0) => (ask > 0 || MODELS[model]?.kind !== "qwen35" || !CTX[model] ? maxSeqFor(model, ask) : ctxTop(model));
+export const lib = { MODELS, FILES, NEED_GB, roomBytes, roomFit, shortNote, shortBy, gbUp, pledgeGB, nodeCtxFor, pickCtx, roomCtxPlan, maxSeqFor, ctxShortNote };
 
-// the context the plugin opens a room with: what was asked (clamped by room/models.js), else the
-// model's largest room context (CTX: 16k on the 1.7B, 64k on the 27B, 128k on the MoE; OpenClaw's
-// prompts alone are 8-12k tokens)
-export const pluginCtx = (key, ask = 0) => (ask > 0 ? maxSeqFor(key, ask) : CTX[key]?.max ?? maxSeqFor(key));
+// the longest context the plugin opens a room with: what was asked (clamped by room/models.js), else the top of the
+// model's ladder (CTX: 16k on the 1.7B, 64k on the 27B, 128k on the MoE; the room opens there when it holds it at full
+// speed, else at a shorter step: room/ctxpick.js roomCtxPlan; OpenClaw's prompts alone are 8-12k tokens)
+export const pluginCtx = (key, ask = 0) => (ask > 0 ? maxSeqFor(key, ask) : ctxTop(key));
 // what the plugin asks the room node for: the context asked for, else none for a model with a fallback
 // context (the node opens the 1.7B at 16k, or at 8k when the room is short of memory for 16k:
 // room/models.js pickCtx), else the model's largest (pluginCtx)
-// (and none for a model with a ladder, Qwen3.8 Flash: the node walks it down from its longest proven context)
+// (and none for a model with a ladder, the 27B, the MoE and Qwen3.8 Flash: the node walks it down from its longest
+// proven context)
 export const pluginAsk = (key, ask = 0) => (ask > 0 ? ask : CTX[key]?.fallback || CTX[key]?.ladder ? 0 : pluginCtx(key));
 
 // OpenClaw's own instructions and tools are about 12k tokens and it keeps 4k for the answer: a room
@@ -62,8 +65,11 @@ export function shortCtxNote(model, ctx, host = "the host") {
   if (!(Number.isInteger(ctx) && ctx > 0 && ctx < OPENCLAW_MIN_CTX)) return null;
   const max = CTX[model]?.max;
   const how = max >= OPENCLAW_MIN_CTX ? `\`pooled host ${model} --ctx ${max}\`` : `a model with a longer context (at least ${OPENCLAW_MIN_CTX / 1024}k)`;
-  const short = CTX[model]?.fallback === ctx && max >= OPENCLAW_MIN_CTX
-    ? ` (the room opens ${String(MODELS[model]?.label || model).split("·")[0].trim()} at ${ctxK(ctx)} when its memory is short for ${ctxK(max)}: a device lending more, or one more device, gets ${ctxK(max)})` : "";
+  // (a context the room falls back to when its memory is short for the model's default: the 1.7B's 8k, the 27B's or the MoE's
+  // ladder below 16k / 32k)
+  const def = CTX[model]?.def;
+  const short = (CTX[model]?.fallback === ctx || (CTX[model]?.ladder?.includes(ctx) && ctx < def)) && def >= OPENCLAW_MIN_CTX
+    ? ` (the room opens ${String(MODELS[model]?.label || model).split("·")[0].trim()} at ${ctxK(ctx)} when its memory is short for ${ctxK(def)}: a device lending more, or one more device, gets ${ctxK(def)})` : "";
   return `${host} runs this room with a ${ctx}-token context, but OpenClaw needs ${OPENCLAW_MIN_CTX / 1024}k: its own instructions and tools take about 12k tokens, so every answer would end in "Context overflow". Ask ${host} to open the room again with ${how}${short}.`;
 }
 // This machine's own room opened the model at its fallback context (room/models.js pickCtx): what to
@@ -78,7 +84,8 @@ export function ownShortCtxNote(model, ctx, ctxNote, needGB = null) {
 // minNeed: { ctx, needGB } at the model's fallback context (the 1.7B: 8k), null without one
 export function modelInfo(key, ctxAsk = 0) {
   const ctx = pluginCtx(key, ctxAsk);
-  return { name: String(MODELS[key]?.label || key).split("·")[0].trim(), needGB: modelNeedGB(lib, key, ctx) ?? NEED_GB[key] ?? null, ctx, fileBytes: FILES[key]?.bytes || null,
+  // (needGB: at the context the room needs to open the way it did before the ladder, its default, unless one was asked)
+  return { name: String(MODELS[key]?.label || key).split("·")[0].trim(), needGB: modelNeedGB(lib, key, pluginAsk(key, ctxAsk) || (CTX[key]?.ladder ? 0 : ctx)) ?? NEED_GB[key] ?? null, ctx, fileBytes: FILES[key]?.bytes || null,
     minNeed: modelFallback(lib, key, pluginAsk(key, ctxAsk)) };
 }
 
@@ -118,8 +125,8 @@ export function modelChoices(dir, pledge) {
     r.hint = [
       r.pulled ? "downloaded ✓" : `${fmtBytes(r.fileBytes)} download`,
       `needs about ${r.needGB} GB across the room${r.minNeed?.needGB ? ` (${r.minNeed.needGB} GB at ${Math.round(r.minNeed.ctx / 1024)}k)` : ""}`,
-      `${Math.round(r.ctx / 1024)}k context`,
-      r.fitsAlone && r.aloneCtx < r.ctx ? `fits on this machine alone at ${Math.round(r.aloneCtx / 1024)}k (OpenClaw needs ${OPENCLAW_MIN_CTX / 1024}k)`
+      CTX[r.key]?.ladder ? `up to ${Math.round(r.ctx / 1024)}k context` : `${Math.round(r.ctx / 1024)}k context`,
+      r.fitsAlone && r.aloneCtx < r.ctx ? `fits on this machine alone at ${Math.round(r.aloneCtx / 1024)}k${r.aloneCtx < OPENCLAW_MIN_CTX ? ` (OpenClaw needs ${OPENCLAW_MIN_CTX / 1024}k)` : ""}`
         : r.fitsAlone ? "fits on this machine alone" : "needs more devices",
       r.key === recommended ? "recommended for OpenClaw" : null,
       isSmall(r.key) ? "small: slow turns and tool loops in OpenClaw" : null,

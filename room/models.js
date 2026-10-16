@@ -4,7 +4,8 @@ import { qwen4expConfig, qwen4expShardBytes } from "../engine/gguf.js";
 import { OFFLOAD_CKPT_SLOTS } from "./plan.js";
 
 // GB each model needs at its default context (the picker's "needs N GB"); NEED_MIN_GB: what a model
-// with a fallback context (CTX[model].fallback) needs there, the least a room can start it with
+// with a fallback context (CTX[model].fallback, or its ladder's last step: ctxFloor) needs there, the least a room can
+// start it with (the 27B's and the MoE's are set at the end of this file, from roomBytes)
 export const NEED_GB = { "qwen3-0.6b": 0.8, "qwen3-1.7b": 5.6, "qwen3-4b": 4.6, "qwen3.8-27b": 17.0, "qwen3.6-35b-moe": 22.5, "qwen3.5-122b-moe": 72.0,
   // Qwen3.8-Flash-Next: its 48 layers with their state at the default context, the embedding and the head, from the
   // planner's own costs (roomBytes at CTX def: set at the end of this file, flashLayerCost), in GiB (2^30, the unit the
@@ -462,7 +463,7 @@ export const FLASH_CTX_PROVEN = [2048, 8192, 16384, 32768, 65536];
 export const FLASH_CTX_OPTIONS = [8192, 32768, 65536, 131072].filter((c) => FLASH_CTX_PROVEN.includes(c));
 function FLASH_CTX_ENTRY() {
   const top = Math.max(...FLASH_CTX_PROVEN);
-  return { def: top, max: top, ladder: FLASH_CTX_PROVEN.slice().sort((a, b) => b - a) };
+  return { def: top, max: top, ladder: FLASH_CTX_PROVEN.slice().sort((a, b) => b - a), options: FLASH_CTX_OPTIONS };
 }
 // Context per model, in tokens: the default a room opens with and the most ?ctx=N may ask for, and
 // for some a fallback: the context a room opens with instead when its pledges can't hold the model
@@ -477,9 +478,26 @@ function FLASH_CTX_ENTRY() {
 // when every device can bind it (ctxForBinding); its cap stays at 64K (128 MiB) until 128K is
 // checked on it. The practical limit is prefill speed, not memory
 // (docs/long-context-and-sessions.md: needle and speed at 32K..128K).
+//
+// A ladder (rooms long-context PR 5 for Flash; the 27B and the 35B MoE since this ladder's PR): the lengths a room may open
+// the model at, longest first. A room opens at the longest step its devices hold (roomCtxPlan: pickCtx), down to the
+// shortest; above `def` (the context the model's need, NEED_GB, is quoted at, and what rooms opened at before the ladder)
+// only when the longer context costs no speed: the room holds it with every expert in GPU memory and on no more devices
+// than at `def` (room/ctxpick.js roomCtxPlan fastAt; decode itself reads only the filled positions, so a longer window
+// alone is no slower). `options`: the picker's context row (room/ctxpick.js ctxOptions). Only lengths checked correct
+// on that model are on its ladder (docs/long-context-and-sessions.md):
+//   27B  64K: needle found (tests/needle_ctx.js, 2026-09-30); 16K and 32K: needle found (attn decode v2, bench-log
+//        2026-10-01); 8K: what its rooms ran before 16K (MAX_SEQ_LONG), and the same engine as at 16K / 32K (below).
+//        128K is not checked (256 MiB per K/V buffer, the 128K prefill was stopped): not offered.
+//   MoE  32K, 64K, 96K, 128K: needle found (tests/needle_ctx.js, 2026-09-30), spec = plain, no NaN; tests/test_moe.js
+//        MATCHes llama.cpp with CTX=131072 (this PR); 8K and 16K: the engine at <= 32K positions is the 32K engine (one
+//        256-position split length, engine/qwen35.js faSplit; decode splits follow the filled length), so it gives the
+//        32K run's tokens on any prompt that fits.
+export const CTX_LADDER_27B = [65536, 32768, 16384, 8192];
+export const CTX_LADDER_MOE = [131072, 65536, 32768, 16384, 8192];
 export const CTX = {
-  "qwen3.8-27b": { def: 16384, max: 65536 },
-  "qwen3.6-35b-moe": { def: 32768, max: 131072 },
+  "qwen3.8-27b": { def: 16384, max: 65536, ladder: CTX_LADDER_27B, options: [8192, 16384, 32768, 65536] },
+  "qwen3.6-35b-moe": { def: 32768, max: 131072, ladder: CTX_LADDER_MOE, options: [8192, 32768, 65536, 131072] },
   // the 122B MoE: 12 attention layers, 2 KV heads x 256 (the 35B's K/V row): 24 KB per position in f16, 128 MiB per
   // layer's K at 131072. Checked at short contexts so far (phase 1): its default stays at the 35B's
   "qwen3.5-122b-moe": { def: 32768, max: 131072 },
@@ -591,6 +609,14 @@ export const ctxForBinding = (meta, ctx, kv = "f16", bindBytes = WEBGPU_MIN_BIND
   if (!per) return ctx;
   return Math.min(ctx, Math.floor(Math.max(bindBytes, WEBGPU_MIN_BIND) / per / 256) * 256);
 };
+// The longest context a room opens `model` at without an ask: the top of its ladder (27B 64K, MoE 128K, Flash 64K), else its
+// default (the 1.7B: 16K). Rooms open there only when their memory holds it at full speed (roomCtxPlan).
+export const ctxTop = (model) => CTX[model]?.ladder?.[0] ?? maxSeqFor(model);
+// The shortest context a room opens `model` at (its fallback, or its ladder's last step), or null without one below def
+export const ctxFloor = (model) => {
+  const c = CTX[model], lo = c?.fallback ?? c?.ladder?.[c.ladder.length - 1];
+  return lo > 0 && lo < c.def ? lo : null;
+};
 export const maxSeqFor = (model, ask = 0) => {
   const c = CTX[model];
   if (!c) return MODELS[model]?.kind === "qwen35" ? MAX_SEQ_LONG : MAX_SEQ;
@@ -610,12 +636,18 @@ export const ctxChoices = (model, want = maxSeqFor(model), ask = 0) => {
 // -> { ctx, want, fits, fellBack } (fellBack: it fits, but only at a shorter context than `want`)
 // cap: the longest context the room's devices take (flashRoomLimits): longer choices are skipped, and when every choice
 // is longer the room is tried at the cap alone
-export function pickCtx(model, { want = maxSeqFor(model), ask = 0, fitsAt, cap = Infinity }) {
+// fastAt(ctx) -> bool (room/ctxpick.js roomCtxPlan, a room opened without a choice): a step longer than the model's def is
+// taken only when fastAt says the room runs it at full speed there; want and fellBack are then measured against def (a
+// room at 32K of the MoE's 128K ladder did not fall back: 32K is its default; one at 16K did)
+export function pickCtx(model, { want = maxSeqFor(model), ask = 0, fitsAt, cap = Infinity, fastAt = null }) {
   let cs = ctxChoices(model, want, ask).filter((c) => c <= cap);
   if (!cs.length) cs = [Math.min(want, cap)];
-  const i = cs.findIndex((c) => !!fitsAt(c));
+  const def = CTX[model]?.def ?? want;
+  const ok = (c) => !!fitsAt(c) && (!fastAt || c <= def || !!fastAt(c));
+  const i = cs.findIndex(ok);
   const ctx = cs[i < 0 ? cs.length - 1 : i];
-  return { ctx, want, fits: i >= 0, fellBack: i > 0 };
+  const aim = fastAt && !(ask > 0) ? Math.min(want, def) : want;
+  return { ctx, want: aim, fits: i >= 0, fellBack: i >= 0 && (fastAt ? ctx < aim : i > 0) };
 }
 // "16K", "8K": a context in words
 export const ctxK = (n) => `${Math.round(n / 1024)}K`;
@@ -624,7 +656,7 @@ export const ctxK = (n) => `${Math.round(n / 1024)}K`;
 export const ctxShortNote = (label, ctx, want) => `${label} · ${ctxK(ctx)} context: the room's memory is short for ${ctxK(want)}`;
 // "needs 5.6 GB (4 GB at 8K)": a model's need at its default, and at its fallback when it has one
 export const needText = (model, gb = NEED_GB[model]) => {
-  const fb = CTX[model]?.fallback, min = NEED_MIN_GB[model];
+  const fb = ctxFloor(model), min = NEED_MIN_GB[model];
   return fb && min != null ? `${gb} GB (${min} GB at ${ctxK(fb)})` : `${gb} GB`;
 };
 
@@ -672,3 +704,12 @@ export const MIN_ROOM = 32;    // a prompt must leave at least this many tokens 
 // Flash's "needs N GB": the planner's own bytes at its default context (roomBytes: every layer's cost, the host's part),
 // rounded up to a tenth, so the picker's number follows the memory model instead of a fixed figure
 NEED_GB["qwen3.8-flash"] = (() => { const rb = roomBytes("qwen3.8-flash", CTX["qwen3.8-flash"].def); return Math.ceil((rb.L * rb.layerBytes + rb.hostBytes) / 2 ** 30 * 10 - 1e-9) / 10; })();
+// What a model's whole deal needs at ctx, in GiB rounded up to a tenth (roomBytes: every layer with its KV cache there and
+// what the host holds besides), or null for a model without a SHAPE: NEED_GB's own rule
+export const needGBAt = (model, ctx, kv = "f16") => {
+  const rb = roomBytes(model, ctx, kv);
+  return rb ? Math.ceil((rb.L * rb.layerBytes + rb.hostBytes) / 2 ** 30 * 10 - 1e-9) / 10 : null;
+};
+// the 27B and the MoE at their ladder's last step (8K): the least a room opens them with ("17 GB (16.5 GB at 8K)"), as
+// NEED_GB less the KV cache 8K saves against def (NEED_GB's label sits a little above the deal's bytes; so does this)
+for (const k of ["qwen3.8-27b", "qwen3.6-35b-moe"]) NEED_MIN_GB[k] = +(NEED_GB[k] - (needGBAt(k, CTX[k].def) - needGBAt(k, ctxFloor(k)))).toFixed(1);

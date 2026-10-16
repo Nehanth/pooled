@@ -2,7 +2,8 @@
 // with the room page's math, Start gating, the keys, and flags that skip every question.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { MODELS, FILES, NEED_GB, roomBytes, pickCtx, ctxShortNote } from "../../room/models.js";
+import { MODELS, FILES, NEED_GB, roomBytes, pickCtx, ctxShortNote, maxSeqFor } from "../../room/models.js";
+import { roomCtxPlan } from "../../room/ctxpick.js";
 import { roomFit, shortNote, shortBy, gbUp } from "../../room/plan.js";
 import { pledgeGB } from "../../room/pledge.js";
 import { nodeCtxFor } from "../../packages/room-node/roomnode.js";
@@ -11,7 +12,8 @@ import { width } from "../lib/style.js";
 import { keysOf } from "../lib/tui.js";
 import { parseLendArgs } from "../lib/lend.js";
 
-const lib = { MODELS, FILES, NEED_GB, roomBytes, roomFit, shortNote, shortBy, gbUp, pledgeGB, nodeCtxFor, pickCtx, ctxShortNote };
+// (as cli/lib/hostrun.js builds it from the room node: roomCtxPlan is the room's own context plan, room/ctxpick.js)
+const lib = { MODELS, FILES, NEED_GB, roomBytes, roomFit, shortNote, shortBy, gbUp, pledgeGB, nodeCtxFor, pickCtx, roomCtxPlan, maxSeqFor, ctxShortNote };
 const KEYS = ["qwen3-0.6b", "qwen3-1.7b", "qwen3-4b", "qwen3.8-27b", "qwen3.6-35b-moe"];
 const dev = (name, gb, extra = {}) => ({ name, meta: { webgpu: true, contribGB: gb, ...extra } });
 
@@ -41,10 +43,11 @@ test("a short room: the same sentence and number as the room page; pledges that 
   const moe = "qwen3.6-35b-moe";
   const one = roomFitNow(lib, { model: moe, devices: [dev("spark", 12)], spareGB: [0] });
   assert.equal(one.fits, false);
-  assert.ok(one.shortGB > 9 && one.shortGB < 15, `short ${one.shortGB}`);
+  assert.ok(one.shortGB > 7 && one.shortGB < 15, `short ${one.shortGB}`);
   assert.match(one.note, /^This room is [\d.]+ GB short for Qwen3.6 35B MoE: add a device or raise a pledge/);
-  // the room page's own computation, byte for byte
-  const rb = roomBytes(moe, nodeCtxFor(moe), "f16");
+  // the room page's own computation, byte for byte: short everywhere on the MoE's ladder, so short for its last step (8K)
+  assert.equal(one.ctx, 8192);
+  const rb = roomBytes(moe, 8192, "f16");
   assert.equal(one.shortGB, gbUp(roomFit(rb.L, [12 * 2 ** 30], rb.layerBytes, rb.hostBytes).short));
   const two = roomFitNow(lib, { model: moe, devices: [dev("spark", 12), dev("mac", 16, { native: "node-dawn" })] });
   assert.equal(two.fits, true); assert.equal(two.haveGB, 28); assert.equal(two.note, "");
@@ -177,7 +180,7 @@ test("the screen: fits 58, 80 and 110 columns in every style, the room's devices
   assert.match(text, /Qwen3\.6 35B MoE · Q4 · waiting for devices/);
   assert.match(text, /DEVICE\s+GPU\s+LENDS/); assert.match(text, /node-abc\s+4 GB\s+joined/); assert.match(text, /spark\s+12 GB\s+this computer/);
   assert.match(text, /otter\s+Mac, 8 GB\s+wants to join  a allow  d deny/);
-  assert.match(text, /memory    ━+─*  17 GB lent · 23 GB needed/);
+  assert.match(text, /memory    ━+─*  17 GB lent · 21 GB needed/);
   assert.match(text, /invite    pooled join 4TK-G9P on the other computer/);
   assert.match(text, /Needs \d+ GB more: one more device, or press l to lend more\./);
   assert.match(text, /enter start · i copy invite · m model · l lend · s split · q quit/);
@@ -246,7 +249,7 @@ test("the host screen: the header once (pill, link, status), the picker as one p
   const text = L.join("\n");
   assert.match(text, /Which model\?\n\n    Qwen3 0\.6B/, "one list, smallest first, no groups");
   assert.doesNotMatch(text, /Fits on this computer|Needs another device/);
-  assert.match(text, /\n    Qwen3\.8 27B\s+needs 20 GB\s+15\.0 GB download/);
+  assert.match(text, /\n    Qwen3\.8 27B\s+needs 17 GB\s+15\.0 GB download/);
   assert.match(text, /\n    Qwen3 1\.7B\s+needs  6 GB \(4 GB at 8K\)   1\.7 GB download/, "the 1.7B: 16K, and its 8K fallback");
   assert.match(text, /› Qwen3 4B\s+needs  5 GB/, "the recommended model is preselected, not labelled");
   assert.doesNotMatch(text, /recommended|"needs"/);
@@ -366,9 +369,9 @@ test("how to run it: Pool with devices first and preselected; Run it here lends 
   // a model this computer can't hold: Run it here is off, with why
   s.sel = rows.indexOf(moe);
   r = reduce(s, "enter"); r = reduce(r.state, "down");
-  assert.match(render(r.state, { lib }).join("\n"), /Run it here +needs 23 GB, this computer has 14 GB to lend/);
+  assert.match(render(r.state, { lib }).join("\n"), /Run it here +needs 21 GB, this computer has 14 GB to lend/);
   r = reduce(r.state, "enter");
-  assert.equal(r.state.step, "how"); assert.match(r.state.notice, /needs 23 GB, this computer has 14 GB to lend/);
+  assert.equal(r.state.step, "how"); assert.match(r.state.notice, /needs 21 GB, this computer has 14 GB to lend/);
   r = reduce(r.state, "up"); r = reduce(r.state, "enter");
   assert.equal(r.state.step, "pledge"); assert.equal(r.state.splitMode, "memory");
 });
@@ -473,7 +476,9 @@ test("expert offload: a 12 GB GPU with RAM to spare runs the 35B --here, its exp
   const olib = { ...lib, offloadFor };
   // the RTX 5070 PC: lends 10 GB by the memory rule (11 at most), 48 GB of its 64 GB of RAM (total less 16)
   assert.equal(hereGB(olib, "qwen3.6-35b-moe", { maxGB: 11 }), null, "no RAM: as before");
-  assert.equal(hereGB(lib, "qwen3.6-35b-moe", { maxGB: 11, ramGB: 48, offGB: 10 }), null, "a lib without offloadFor: as before");
+  // (an older room node's lib: no offloadFor and no roomCtxPlan, which brings the room's own offload rules)
+  const old = { ...lib, roomCtxPlan: undefined, maxSeqFor: undefined };
+  assert.equal(hereGB(old, "qwen3.6-35b-moe", { maxGB: 11, ramGB: 48, offGB: 10 }), null, "a lib without offloadFor: as before");
   assert.equal(hereGB(olib, "qwen3.6-35b-moe", { maxGB: 11, ramGB: 48, offGB: 10 }), 10, "the memory rule's 10 GB, the experts it can't hold in RAM");
   assert.equal(hereGB(olib, "qwen3.6-35b-moe", { maxGB: 11, ramGB: 4, offGB: 10 }), null, "4 GB of RAM can't take the experts");
   // a model it holds whole is still dealt whole, at the least that holds it
@@ -502,4 +507,19 @@ test("--here --disk: a MoE model the GPU and --ram can't hold runs here with som
   assert.ok(plain[0].hereOff && !plain[0].hereDisk, "48 GB of RAM: parked, no disk (the last resort)");
   assert.deepEqual(selfMeta(10, 8, M), { contribGB: 10, webgpu: true, offload: true, ramGB: 8, disk: true, local: [M] });
   assert.deepEqual(selfMeta(10, 0, M), { contribGB: 10, webgpu: true }, "no RAM: no disk tier");
+});
+
+test("the 27B and the MoE: pooled host's screen, the room node and the room page open a room at the same context", async () => {
+  const { RoomNode } = await import("../../packages/room-node/roomnode.js");
+  const { dealPledgeBytes } = await import("../../room/pledge.js");
+  const rooms = [[dev("mac", 16), dev("pc", 7, { native: "node-dawn" }), dev("iphone", 1, { ua: "iPhone" })], [dev("mac", 17), dev("pc", 6), dev("iphone", 1, { ua: "iPhone" })],
+    [dev("spark", 40, { native: "node-dawn" })], [dev("pc", 12, { native: "node-dawn", offload: true, ramGB: 48 })], [dev("mac", 16)], [dev("a", 11), dev("b", 11)]];
+  for (const model of ["qwen3.8-27b", "qwen3.6-35b-moe"]) for (const devices of rooms) {
+    const at = `${model}: ${devices.map((d) => `${d.name} ${d.meta.contribGB}`).join(" + ")}`;
+    const screen = roomFitNow(lib, { model, devices });
+    const page = roomCtxPlan(model, { metas: devices.map((d) => d.meta), pledges: devices.map((d) => dealPledgeBytes(d.meta, Infinity, model)) });
+    const node = RoomNode.ctxPick(model, { want: nodeCtxFor(model), self: { name: devices[0].name, meta: devices[0].meta }, peers: devices.slice(1).map((d, i) => ({ id: String(i), name: d.name, meta: d.meta })) });
+    assert.deepEqual([screen.ctx, screen.fits, screen.fellBack], [page.ctx, page.fits, page.fellBack], `${at}: screen`);
+    assert.deepEqual([node.ctx, node.fits, node.fellBack], [page.ctx, page.fits, page.fellBack], `${at}: node`);
+  }
 });

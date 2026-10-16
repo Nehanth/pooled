@@ -337,7 +337,9 @@ test("the 1.7B: the plugin asks the room node for no context (16k, 8k when short
   assert.equal(pluginCtx("qwen3-1.7b"), 16384, "what OpenClaw is told: 16k");
   assert.equal(pluginAsk("qwen3-1.7b"), 0, "the node picks 16k, or 8k when the room is short");
   assert.equal(pluginAsk("qwen3-1.7b", 16384), 16384, "an asked context stays asked");
-  assert.equal(pluginAsk("qwen3.6-35b-moe"), 131072, "no fallback on the MoE: its largest");
+  assert.equal(pluginAsk("qwen3.6-35b-moe"), 0, "the MoE's ladder: the node opens the longest it holds at full speed");
+  assert.equal(pluginCtx("qwen3.6-35b-moe"), 131072, "up to 128k");
+  assert.equal(pluginAsk("qwen3.8-27b"), 0, "the 27B's ladder too");
   // one machine lending 4 GB: the room opens the 1.7B at 8k; 6 GB holds 16k
   const one = (gb) => roomFitNow(lib, { model: "qwen3-1.7b", devices: [{ name: "this machine", meta: { contribGB: gb, webgpu: true } }], ctxAsk: pluginAsk("qwen3-1.7b") });
   assert.deepEqual([one(4).fits, one(4).ctx, one(4).fellBack], [true, 8192, true]);

@@ -6,8 +6,8 @@
 // Qwen3.8-Flash-Next (rooms long-context PR 5): the room's K / V format and the longest context its devices take
 // (room/models.js flashRoomLimits), the ladder of proven lengths (CTX ladder), and the user's context choice in the
 // picker (want: the longest it may open at; the room walks the ladder down from there when its memory is short).
-import { MODELS, CTX, FLASH_CTX_OPTIONS, maxSeqFor, kvModeFor, pickCtx, roomBytes, flashRoomLimits, flashTabHostMargin, ctxK } from "./models.js";
-import { roomFit, dealRoom, dealWithHostMargin, minFitPledge, gbUp } from "./plan.js";
+import { MODELS, CTX, maxSeqFor, ctxTop, kvModeFor, pickCtx, roomBytes, flashRoomLimits, flashTabHostMargin, ctxK } from "./models.js";
+import { roomFit, dealRoom, dealWithHostMargin, minFitPledge, gbUp, isPhoneMeta } from "./plan.js";
 import { offloadFor } from "./pledge.js";
 
 // costs(ctx, kv) -> { L, layers (a number: one layer's bytes, or Flash's per-layer costs), hostBytes, experts }: the
@@ -36,7 +36,15 @@ export function fitAtCtx(model, { c, kv, pledges, metas, costs, margin = null, d
   return { fit: d.fit, deal: d, costs: x, off };
 }
 
-// The room's context for `model` and its fit there.
+// The room's context for `model` and its fit there: the picker (room.js roomFitFor), Start (room.js aiStart), the room
+// node (packages/room-node RoomNode.ctxPick: `pooled host`, `pooled serve`'s room, the OpenClaw plugin) and `pooled host`'s
+// screen (cli/lib/hostui.js roomFitNow) all call this, so they open a room at the same context.
+// Without an ask or a choice a model with a ladder (CTX: the 27B, the 35B MoE, Flash) opens at the longest step the room
+// holds, but past its default (CTX def: 16K on the 27B, 32K on the MoE) only at full speed (fastAt): the room holds that
+// context with no expert offloaded (fit.offload: each token then copies experts from RAM or disk) and on no more devices
+// than at the default (a longer context that pulls a phone, or one more hop, into the chain slows every token). Decode
+// reads only the filled positions (engine attn_dec splits follow the length), so a longer window alone costs memory, not
+// speed. Such a room keeps the default, and the picker's context row has the longer ones a click away.
 // metas / pledges: the devices that may be dealt layers, host first (pledges in bytes: room/pledge.js dealPledgeBytes);
 // ask: an explicit context (?ctx=, --ctx: tried alone); choice: the picker's context choice (the longest the room opens
 // at; the ladder below it when short); kvAsk: the room's ?kv= (Qwen 3.5 only); costs / margin / deal: as fitAtCtx.
@@ -47,22 +55,27 @@ export function fitAtCtx(model, { c, kv, pledges, metas, costs, margin = null, d
 export function roomCtxPlan(model, { metas, pledges, ask = 0, choice = 0, kvAsk = null, costs = roomCosts(model), margin = null, cap = Infinity, wrapOff }) {
   const lim = flashRoomLimits(model, metas);
   const kv = lim.kv || kvModeFor(model, kvAsk), top = Math.min(lim.cap, cap);
-  const want = ask > 0 ? maxSeqFor(model, ask) : choice > 0 ? Math.min(maxSeqFor(model), maxSeqFor(model, choice)) : maxSeqFor(model);
+  const want = ask > 0 ? maxSeqFor(model, ask) : choice > 0 ? Math.min(ctxTop(model), maxSeqFor(model, choice)) : ctxTop(model);
   const fitAt = (c, pl = pledges, deal = {}) => fitAtCtx(model, { c, kv, pledges: pl, metas, costs, margin, deal, wrapOff });
-  const pick = pickCtx(model, { want, ask, cap: top, fitsAt: (c) => !!fitAt(c)?.fit.fits });
+  // full speed at c: the deal by memory (phones only when the computers can't hold it, as Start and the node deal) holds
+  // every expert in GPU memory, on at most as many devices as at the default
+  let usedDef;
+  const used = (c) => { const r = fitAt(c, pledges, { phone: metas.map(isPhoneMeta) }); return r?.fit.fits && !r.fit.offload ? r.deal.used.length : -1; };
+  const fastAt = ask > 0 || choice > 0 ? null : (c) => { usedDef ??= used(Math.min(CTX[model]?.def ?? c, top)); const n = usedDef > 0 ? used(c) : -1; return n > 0 && n <= usedDef; };
+  const pick = pickCtx(model, { want, ask, cap: top, fitsAt: (c) => !!fitAt(c)?.fit.fits, fastAt });
   return { ...pick, kv, cap: top, fitAt };
 }
 
-// The picker's context choices for a model (Qwen3.8-Flash-Next: FLASH_CTX_OPTIONS, proven lengths only), each with
+// The picker's context choices for a model (CTX options: the 27B, the 35B MoE, Flash; proven lengths only), each with
 // what it needs in this room: [{ ctx, label, fits, needGB, shortGB, why, capped }] (needGB: the GPU memory the planner
 // needs from these devices at that context, minFitPledge, as the picker's need line; shortGB / why: how much more, when
 // it doesn't fit; capped: a device here can't take that long a context). [] for a model without choices.
 export function ctxOptions(model, { metas, pledges, costs = roomCosts(model), margin = null, kvAsk = null }) {
-  if (!CTX[model]?.ladder) return [];
+  if (!CTX[model]?.options) return [];
   const lim = flashRoomLimits(model, metas);
   const kv = lim.kv || kvModeFor(model, kvAsk);
   const has = pledges.reduce((a, b) => a + (b > 0 ? b : 0), 0) / 2 ** 30;
-  return FLASH_CTX_OPTIONS.map((c) => {
+  return CTX[model].options.map((c) => {
     const capped = c > lim.cap;
     const fitAt = (pl) => fitAtCtx(model, { c, kv, pledges: pl, metas, costs, margin });
     const f = capped ? null : fitAt(pledges);

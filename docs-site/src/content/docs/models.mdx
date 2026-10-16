@@ -9,6 +9,9 @@ sidebar:
 {/*
 Sources (for the fact-checker):
 - room/models.js: PICKER, NEED_GB (5.6 / 17.0 / 22.5), NEED_MIN_GB (1.7B 4.0 at its 8K fallback), CTX.fallback + pickCtx() (16K, else 8K when the pledges are short for 16K), FILE_GB (1.83 / 16.06 / 20.84), CTX (1.7B 16384/16384, fallback 8192, 27B 16384/32768, MoE 32768/65536), maxSeqFor() (?ctx= rounded to 256, at least 2048)
+- context ladder (feat/ctx-default-ladder): CTX ladder / options for the 27B (64K/32K/16K/8K; picker 8K/16K/32K/64K) and the MoE
+  (128K/64K/32K/16K/8K; picker 8K/32K/64K/128K), room/ctxpick.js roomCtxPlan (past def only with no expert offloaded and on no
+  more devices than at def), NEED_MIN_GB at 8K (27B 16.5, MoE 22.0)
 - 0.4.0 (origin/main ed31899): CTX 27B max 65536, MoE max 131072; expert offload
   (#319, #320, #323): 35B on the RTX 5070 alone about 38-45 tok/s (37.5-44.9 measured on the published 0.4.0, ~40 on long generations), 17.5 GiB parked
 - room/plan.js: bestFit() (picker preselects the biggest model that fits)
@@ -26,13 +29,13 @@ Pick by how much memory the room has. The header shows it as `N GB pooled`, and 
 | Model | The room needs | Download | Context |
 |---|---|---|---|
 | Qwen3 1.7B | 5.6 GB (4 GB at 8K) | 1.83 GB | 16K (8K when the room is short) |
-| Qwen3.8 27B | 17 GB | 16.06 GB | 16K (up to 64K) |
-| Qwen3.6 35B MoE | 22.5 GB | 20.84 GB | 32K (up to 128K) |
+| Qwen3.8 27B | 17 GB (16.5 GB at 8K) | 16.06 GB | up to 64K: the longest the room holds (16K at 17 GB, 64K at about 20 GB) |
+| Qwen3.6 35B MoE | 22.5 GB (22 GB at 8K) | 20.84 GB | up to 128K: the longest the room holds (32K at 22.5 GB, 128K at about 23.5 GB) |
 | Qwen3.8-Flash-Next (**experimental**; `POOLED_DEV=1` for `pooled host` / `list`) | 72 GB, or about 8 GB on one tab with its experts on disk | 100.6 GB (71.8 GB of layers, 28.8 GB n-gram table) | 64K (the picker offers 8K, 32K and 64K; 128K in progress) |
 
 The download is split across the devices that run the model, so each one fetches only its part.
 
-The 1.7B opens with a 16K context when the room has 5.6 GB for it. With less, down to 4 GB, it opens with 8K instead, and the room says so: `Qwen3 1.7B · 8K context: the room's memory is short for 16K`. The picker row then reads `4 GB · 8K fits`. Add a device or raise a pledge for 16K. A room opened with `?ctx=` keeps the context it asked for.
+The 27B and the MoE open at the longest context the room holds without slowing down (see [Longer context](#longer-context)). The 1.7B opens with a 16K context when the room has 5.6 GB for it. With less, down to 4 GB, it opens with 8K instead, and the room says so: `Qwen3 1.7B · 8K context: the room's memory is short for 16K`. The picker row then reads `4 GB · 8K fits`. Add a device or raise a pledge for 16K. A room opened with `?ctx=` keeps the context it asked for.
 
 ## Which one to pick
 
@@ -70,13 +73,25 @@ Only give memory the device really has free. On a Mac, the GPU shares memory wit
 
 ## Longer context
 
-Context is the prompt and the answer together. To get more, add `?ctx=` to the room's address before you press Start, on the device that will host. For example, 64K on the MoE:
+Context is the prompt and the answer together. The 27B, the MoE and Qwen3.8 Flash open at the longest context the room's memory holds, so you don't need to set anything:
+
+| Model | Lengths | Opens at |
+|---|---|---|
+| Qwen3.8 27B | 8K, 16K, 32K, 64K | the longest that fits, at least 16K when the room holds that |
+| Qwen3.6 35B MoE | 8K, 16K, 32K, 64K, 128K | the longest that fits, at least 32K when the room holds that |
+| Qwen3.8 Flash | 2K to 64K | the longest that fits |
+
+A longer context only takes memory: a reply comes just as fast at 128K as at 32K until the conversation actually gets that long. So the room goes past the 27B's 16K or the MoE's 32K only when that costs no speed: every device keeps its layers' experts on its GPU, and no extra device (such as a phone) has to hold layers. Otherwise it stays at 16K or 32K. A room short of memory even for those opens at a shorter length and says so, for example `Qwen3.6 35B MoE · 8K context: the room's memory is short for 32K`.
+
+The picker shows a **Context** row under the models with each length, the memory it needs in this room, and which ones fit. Pick one to open the room at it (the room remembers your choice). While the model runs, **Room settings** can change it; the model then loads again on every device. Reading a long prompt from scratch still takes a while: about 2 minutes for 32K tokens and 15 minutes for 128K on the MoE on one GB10.
+
+To ask for an exact length instead, add `?ctx=` to the room's address before you press Start, on the device that will host. For example, 64K on the MoE:
 
 ```text
 https://pooled.run/room?ctx=65536
 ```
 
-See [URL options](/docs/reference/url-options) for this and `?kv=q8`, which saves memory on the two big models.
+The room then opens at that length or not at all. See [URL options](/docs/reference/url-options) for this and `?kv=q8`, which saves memory on the two big models.
 
 ## Details
 

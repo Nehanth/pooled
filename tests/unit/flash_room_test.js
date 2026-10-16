@@ -36,7 +36,7 @@ Deno.test("flash catalogue: dev-gated entry, pinned files, shape from the GGUF h
   // context: dense attention is exact to 2051 cells and the phase-1 engine refuses more
   // the longest proven context is the default and the cap; the ladder walks the proven lengths down (rooms long-context PR 5)
   eq([CTX[KEY], maxSeqFor(KEY), maxSeqFor(KEY, 32768), kvModeFor(KEY, "q8")],
-    [{ def: 65536, max: 65536, ladder: [65536, 32768, 16384, 8192, 2048] }, 65536, 32768, "f16"]);
+    [{ def: 65536, max: 65536, ladder: [65536, 32768, 16384, 8192, 2048], options: [8192, 32768, 65536] }, 65536, 32768, "f16"]);
   // shape: 48 layers, 512 experts with layers 0-5's Q4_1 down experts parked as Q8, the 4-stream residual, the table
   eq([S.L, S.park.nExp, S.park.runs.map(([n]) => n), S.hDim, wireWidth(KEY), S.ngram, ngramOf(KEY)],
     [48, 512, [6, 42], 10240, 10240, { layer: 1, bytes: 28800138240 }, { layer: 1, bytes: 28800138240 }]);
