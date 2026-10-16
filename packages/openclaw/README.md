@@ -101,8 +101,7 @@ tools) once, then keeps it.
 Onboarding preselects the MoE when this device can hold it, and the 27B when only that fits. A room can
 hold more than any one device: it waits for more devices. A `pooled join` device (`@pooled/cli` 0.4.0 or
 newer) with a discrete GPU can make up a short room by keeping some of the MoE's experts in system RAM
-(`--ram`), more slowly; the gateway holds its layers whole. The Qwen3.5 122B MoE is in `pooled host`,
-not in OpenClaw's onboarding.
+(`--ram`), more slowly; the gateway holds its layers whole.
 
 ## Requirements
 

@@ -49,7 +49,7 @@ Issues get the `area:` label of their section.
 As of October 11, 2026, every roadmap line was checked against the code:
 
 - **`@pooled/cli` 0.4:** `pooled serve` with OpenAI and Anthropic endpoints and tool calling, `pooled host` / `join` / `chat` on a native peer, and the OpenClaw plugin ([#4](https://github.com/Nehanth/pooled/issues/4), [#11](https://github.com/Nehanth/pooled/issues/11)).
-- **Bigger models:** the Qwen3.5 122B, and MoE experts kept in system RAM (`--ram`), so a Mac Studio and an RTX 5070 PC run the 122B at about 17 tok/s.
+- **Bigger models:** MoE experts kept in system RAM (`--ram`), so one RTX 5070 PC runs the 35B MoE alone at about 38-45 tok/s.
 - **Security:** channel-bound join auth, where keys and passes are proved, never sent.
 - **Networks:** the TURN relay, in the browser and now the CLI ([#1](https://github.com/Nehanth/pooled/issues/1)).
 - **Speed and sessions:** the prefill kernels ([#2](https://github.com/Nehanth/pooled/issues/2)); checkpoints on disk and prefix reuse across agent turns ([#69](https://github.com/Nehanth/pooled/issues/69), [#73](https://github.com/Nehanth/pooled/issues/73)); GPU sampling ([#26](https://github.com/Nehanth/pooled/issues/26)); the GEMV 8-row fix ([#47](https://github.com/Nehanth/pooled/issues/47)).

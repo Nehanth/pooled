@@ -14,8 +14,7 @@ Sources (feat/pooled-join 88dc35a, PR #270, stacked on #266; the room page's gat
 - `node cli/bin/pooled.js host --help`, `join --help`, `chat --help`, `--help` (copied below as printed, 2026-09-30)
 - `node cli/bin/pooled.js host --model list` (the five model keys)
 - 0.4.0 (origin/main ed31899): --ram and expert offload (#319, #320, #323: cli/lib/lend.js parseRam/ramRule, RAM_KEEP_GB 16;
-  room/plan.js; 35B on the RTX 5070 alone about 38-45 tok/s (37.5-44.9 measured on the published 0.4.0) and the 122B Spark/Mac+PC rooms: docs/bench-log.md 2026-10-02 and the
-  maintainer's Mac Studio + RTX 5070 run, ~17 tok/s), the 122B (#316; NEED_GB 72 -> the picker's "needs 73 GB"; FILES 72.5 GB),
+  room/plan.js; 35B on the RTX 5070 alone about 38-45 tok/s (37.5-44.9 measured on the published 0.4.0): docs/bench-log.md 2026-10-02),
   help blocks re-copied from `node cli/bin/pooled.js <cmd> --help`
 - --disk (roadmap/32 steps 3-5: cli/lib/lend.js diskRule, DISK_RAM_MIN_GB 2; room/plan.js DISK_RAM_MIN, offloadNeedDisk;
   engine/expert_t1.js; packages/room-node/shard.js expertReader): help blocks re-copied from `node cli/bin/pooled.js <cmd> --help`
@@ -179,7 +178,7 @@ On a discrete GPU it then allocates that much for a moment, to make sure it is r
 
 ### MoE experts in system RAM
 
-From `@pooled/cli` 0.4.0, a computer with a discrete GPU can hold more of a mixture-of-experts model (the 35B MoE or the 122B MoE) than its GPU pledge. It keeps some layers' experts in system RAM and copies the ones each token uses into a cache on the GPU. The room does this only when the pledges alone can't hold the model. It is slower than holding the layers whole, and while a device does it the room decodes without speculation, which is faster there.
+From `@pooled/cli` 0.4.0, a computer with a discrete GPU can hold more of a mixture-of-experts model (the 35B MoE) than its GPU pledge. It keeps some layers' experts in system RAM and copies the ones each token uses into a cache on the GPU. The room does this only when the pledges alone can't hold the model. It is slower than holding the layers whole, and while a device does it the room decodes without speculation, which is faster there.
 
 - `--ram 24` lets the experts use up to 24 GB of RAM. `--ram 0` turns it off.
 - The default is the total RAM less 16 GB, never more than is free at start less 4 GB, and at most 64 GB.
@@ -190,7 +189,6 @@ The header shows `RAM up to N GB`, and the host's log says which layers each dev
 | Room | Speed |
 |---|---|
 | Qwen3.6 35B MoE on one RTX 5070 (12 GB): `pooled host qwen3.6-35b-moe --here` | about 38-45 tok/s |
-| Qwen3.5 122B MoE on a Mac Studio (lends 25 GB) and an RTX 5070 PC (the rest of the layers, 42 GB of experts in RAM) | about 17 tok/s, matching llama.cpp |
 
 ### MoE experts read from disk
 
@@ -376,12 +374,9 @@ qwen3-1.7b         Qwen3 1.7B · Q8
 qwen3-4b           Qwen3 4B · Q8
 qwen3.8-27b        Qwen3.8 27B · Q4
 qwen3.6-35b-moe    Qwen3.6 35B MoE · Q4
-qwen3.5-122b-moe   Qwen3.5 122B MoE · Q4
 ```
 
-With `POOLED_DEV=1`, the list also has `qwen3.8-flash` (Qwen3.8-Flash-Next · Q4, a 100.6 GB download in three files: 71.8 GB of layers and a 28.8 GB n-gram table). It is experimental (the CLI calls it a preview): rooms run it at up to 64K tokens of context. The CLI on npm doesn't have Flash's newest code yet, so run the CLI from the repo to lend or host it (see the [CLI README](https://github.com/Nehanth/pooled/blob/main/cli/README.md#qwen38-flash-experimental-run-the-cli-from-the-repo)). `pooled join` needs no flag to lend to a room that runs it, and `pooled pull qwen3.8-flash` / `pooled rm qwen3.8-flash` take its full name without `POOLED_DEV=1`.
-
-The Qwen3.5 122B MoE is a 72.5 GB download (two files) and needs about 73 GB across the room. It is for a room of big machines, or one with a PC that keeps its experts in RAM. The room page lists it only with `?dev=1`.
+With `POOLED_DEV=1`, the list also has `qwen3.8-flash` (Qwen3.8-Flash-Next · Q4, a 100.6 GB download in three files: 71.8 GB of layers and a 28.8 GB n-gram table). It is experimental (the CLI calls it a preview): rooms run it at up to 64K tokens of context. Lending to or hosting it needs `@pooled/cli` 2.0.0 or newer (see the [CLI README](https://github.com/Nehanth/pooled/blob/main/cli/README.md#qwen38-flash-experimental-from-the-terminal)). `pooled join` needs no flag to lend to a room that runs it, and `pooled pull qwen3.8-flash` / `pooled rm qwen3.8-flash` take its full name without `POOLED_DEV=1`.
 
 ### pooled host --help
 

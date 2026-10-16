@@ -5260,6 +5260,12 @@ async function aiOnData(from, d) {
     sendTo(from, { t: "ai-error", message: remote });
     return;
   }
+  // a model this page's catalogue doesn't have (a host on another version): refused out loud, as packages/room-node does
+  if (d.t === "ai-load" && !MODELS[d.model]) {
+    log("room", `refused layers of unknown model ${String(d.model).slice(0, 40)}`);
+    sendTo(from, { t: "ai-error", load: 1, message: `${myName} refused the layers: unknown model ${String(d.model).slice(0, 40)}` });
+    return;
+  }
   // returned hidden states are only accepted from the end of the chain
   if ((d.t === "ai-hiddenret" || d.t === "ai-hiddenret-b") && from !== ai.chain[ai.chain.length - 1]) return;
   switch (d.t) {

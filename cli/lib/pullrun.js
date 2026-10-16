@@ -7,7 +7,7 @@ import { style, label, progressRow, padStart, clip, gb, I } from "./style.js";
 import { liveRegion } from "./tui.js";
 import { colorOn } from "./tui.js";
 import { argsError } from "./cli.js";
-import { hostable, devHint, DEV_KINDS, fmtGb } from "./lend.js";
+import { hostable, devHint, devModel, fmtGb } from "./lend.js";
 import { statfsSync } from "node:fs";
 
 export const HELP_PULL = `Usage
@@ -112,10 +112,11 @@ export async function pullMain(cmd0, argv, { loadRoomNode }) {
   const pick = () => {
     if (!r.positionals.length) { err(`pooled ${cmd0} needs a model: pooled ${cmd0} ${keys.includes("qwen3-1.7b") ? "qwen3-1.7b" : keys[0]} (pooled list shows them all).`); return null; }
     if (r.positionals.length > 1) { err(`pooled ${cmd0} takes one model, not ${r.positionals.length}: ${r.positionals.slice(0, 3).join(" ")}`); return null; }
-    // a preview model (Qwen3.8-Flash-Next) named in full: pooled pull / rm take it without POOLED_DEV=1, so a device can
-    // have it on disk before it joins a room that runs it (pooled join reads its experts from those files, --disk)
+    // a preview or developer model (Qwen3.8-Flash-Next, the Qwen3.5 122B: lend.js devModel) named in full: pooled pull / rm
+    // take it without POOLED_DEV=1, so a device can have it on disk before it joins a room that runs it (pooled join reads
+    // its experts from those files, --disk), and can free the disk an older pooled filled with it
     const exact = String(r.positionals[0]).trim().toLowerCase();
-    if (cmd !== "list" && rn.MODELS[exact]?.gguf && DEV_KINDS.includes(rn.MODELS[exact].kind)) return exact;
+    if (cmd !== "list" && rn.MODELS[exact]?.gguf && devModel(rn.MODELS, exact)) return exact;
     const m = resolveModel(r.positionals[0], keys);
     if (m.error) { err(`pooled ${cmd0}: ${devHint(rn.MODELS, r.positionals[0]) || `${m.error}; one of: ${m.choices.join(", ")}`}`); return null; }
     return m.key;

@@ -12,10 +12,8 @@ Sources (for the fact-checker):
 - context ladder (feat/ctx-default-ladder): CTX ladder / options for the 27B (64K/32K/16K/8K; picker 8K/16K/32K/64K) and the MoE
   (128K/64K/32K/16K/8K; picker 8K/32K/64K/128K), room/ctxpick.js roomCtxPlan (past def only with no expert offloaded and on no
   more devices than at def), NEED_MIN_GB at 8K (27B 16.5, MoE 22.0)
-- 0.4.0 (origin/main ed31899): CTX 27B max 65536, MoE max 131072; the 122B (#316): NEED_GB 72 (the CLI picker's "needs 73 GB"
-  with its context), FILE_GB 72.52, in hostable() for pooled host / pull, ?dev=1 only on the room page; expert offload
-  (#319, #320, #323): 35B on the RTX 5070 alone about 38-45 tok/s (37.5-44.9 measured on the published 0.4.0, ~40 on long generations), 17.5 GiB parked;
-  122B Mac Studio --gb 25 + RTX 5070 PC (layers 15-47 offloaded, 41.8 GiB parked) ~17 tok/s (#323, maintainer's run)
+- 0.4.0 (origin/main ed31899): CTX 27B max 65536, MoE max 131072; expert offload
+  (#319, #320, #323): 35B on the RTX 5070 alone about 38-45 tok/s (37.5-44.9 measured on the published 0.4.0, ~40 on long generations), 17.5 GiB parked
 - room/plan.js: bestFit() (picker preselects the biggest model that fits)
 - cli/README.md "Claude Code": its prompt is 15-20k tokens; use the MoE or 27B
 - room/pledge.js (phone caps)
@@ -33,7 +31,6 @@ Pick by how much memory the room has. The header shows it as `N GB pooled`, and 
 | Qwen3 1.7B | 5.6 GB (4 GB at 8K) | 1.83 GB | 16K (8K when the room is short) |
 | Qwen3.8 27B | 17 GB (16.5 GB at 8K) | 16.06 GB | up to 64K: the longest the room holds (16K at 17 GB, 64K at about 20 GB) |
 | Qwen3.6 35B MoE | 22.5 GB (22 GB at 8K) | 20.84 GB | up to 128K: the longest the room holds (32K at 22.5 GB, 128K at about 23.5 GB) |
-| Qwen3.5 122B MoE (preview: `?dev=1`, or the terminal) | 73 GB | 72.52 GB | 32K (up to 128K) |
 | Qwen3.8-Flash-Next (**experimental**; `POOLED_DEV=1` for `pooled host` / `list`) | 72 GB, or about 8 GB on one tab with its experts on disk | 100.6 GB (71.8 GB of layers, 28.8 GB n-gram table) | 64K (the picker offers 8K, 32K and 64K; 128K in progress) |
 
 The download is split across the devices that run the model, so each one fetches only its part.
@@ -47,8 +44,6 @@ The 27B and the MoE open at the longest context the room holds without slowing d
 - **22.5 GB or more:** Qwen3.6 35B MoE. It is the bigger file but the fastest of the two big models, because each word uses only a small part of it.
 - **Claude Code or Codex through the [Serve API](/docs/serve):** the MoE or the 27B. Their prompts alone are too long for the 1.7B.
 - **One PC with a 12 GB GPU:** the MoE from the terminal, with `pooled host qwen3.6-35b-moe --here`. It keeps the experts the GPU can't hold in system RAM (about 19 GB of them) and runs at about 38-45 tok/s on an RTX 5070. See [MoE experts in system RAM](/docs/terminal#moe-experts-in-system-ram).
-
-In the terminal, `pooled host` and `pooled pull` also list the **Qwen3.5 122B MoE**: about 73 GB across the room and a 72.52 GB download. A Mac Studio lending 25 GB and an RTX 5070 PC keeping 42 GB of its experts in RAM run it at about 17 tok/s. The room page shows it only with `?dev=1`.
 
 When a room's GPUs and RAM together still fall short of a MoE model, a computer started with `--disk` can read some of its experts from the model's files on its SSD instead. The room does this only as a last resort, and it is slower. See [MoE experts read from disk](/docs/terminal#moe-experts-read-from-disk). A browser tab has its own disk tier for Qwen3.8 Flash (below).
 
@@ -70,7 +65,7 @@ Qwen3.8 Flash is a 125B mixture-of-experts model that uses about 6B of its param
 
 Reading from disk is the slow part. Every device that joins holds part of the model in its own memory, so less comes from disk and the room gets faster. A Mac Studio running it alone in a Chrome tab decodes about 8 tokens/s; with an RTX 5070 PC joined, about 10-12 tokens/s, depending on the network between them.
 
-It is **experimental**. Context goes up to 64K tokens (the picker offers 8K, 32K and 64K), tested against llama.cpp; 128K is in progress. To lend or host it from the terminal, run the CLI from the repo for now: the CLI on npm doesn't have Flash's newest code yet (see the [CLI README](https://github.com/Nehanth/pooled/blob/main/cli/README.md#qwen38-flash-experimental-run-the-cli-from-the-repo)).
+It is **experimental**. Context goes up to 64K tokens (the picker offers 8K, 32K and 64K), tested against llama.cpp; 128K is in progress. To lend or host it from the terminal, use `@pooled/cli` 2.0.0 or newer: `npx @pooled/cli join <ROOM CODE>` (see the [CLI README](https://github.com/Nehanth/pooled/blob/main/cli/README.md#qwen38-flash-experimental-from-the-terminal)).
 
 :::tip
 Only give memory the device really has free. On a Mac, the GPU shares memory with everything else that is open.
