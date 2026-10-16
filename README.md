@@ -56,6 +56,8 @@ Qwen3.8 Flash is a 125B mixture-of-experts model that uses about 6B of its param
 
 Pooling makes it faster. Reading from disk is the slow part, and each device that joins holds part of the model in its own memory, so less of it has to come from disk. The room deals the model out again as devices join or leave.
 
+Measured in October 2026: a Mac Studio running it alone in a Chrome tab decodes about 8 tokens/s. With a PC with an RTX 5070 joined (`pooled join`), the pair decodes about 10-12 tokens/s, depending on the network between them.
+
 It is **experimental**:
 
 - Context is 2K tokens in the current release. Up to 64K tokens is tested and matches llama.cpp, and comes with the next update; 128K is in progress.
