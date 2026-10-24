@@ -1,0 +1,19 @@
+92196b0 direct_io_probe: time the reads' own span, EVICT before the arms
+busy: 
+cpu%: 8
+avail MB: 58333
+start 2026-10-12T19:37:05.9486494-04:00
+3 files, 73728 parts (mean 0.88 MiB), 2160 parts per arm (2.00 GB), run 0, win32 node v24.15.0, direct flag 0x2000000
+evicted: read 85.0 GB of other files in 28 s
+byte check (part at 14820718176, 921600 B): identical
+{"slot":1,"mode":"buffered","inflight":1,"GBps":1.55,"p50":0.56,"p99":1.09,"GB":2,"s":1.3}
+{"slot":2,"mode":"direct","inflight":1,"GBps":0.91,"p50":0.98,"p99":2.52,"GB":2,"s":2.2}
+{"slot":3,"mode":"buffered","inflight":4,"GBps":2.93,"p50":1.02,"p99":3.13,"GB":2,"s":0.7}
+{"slot":4,"mode":"direct","inflight":4,"GBps":4.29,"p50":0.73,"p99":3.25,"GB":2,"s":0.5}
+{"slot":5,"mode":"buffered","inflight":16,"GBps":5.93,"p50":2.09,"p99":7.32,"GB":2,"s":0.3}
+{"slot":6,"mode":"direct","inflight":16,"GBps":5.32,"p50":2.07,"p99":13.79,"GB":2,"s":0.4}
+{"slot":7,"mode":"buffered","inflight":32,"GBps":5.82,"p50":4.08,"p99":17.64,"GB":2,"s":0.3}
+{"slot":8,"mode":"direct","inflight":32,"GBps":2.87,"p50":7.63,"p99":37.63,"GB":2,"s":0.7}
+{"run":0,"platform":"win32","node":"v24.15.0","rows":[{"slot":1,"mode":"buffered","inflight":1,"GBps":1.55,"p50":0.56,"p99":1.09,"GB":2,"s":1.3},{"slot":2,"mode":"direct","inflight":1,"GBps":0.91,"p50":0.98,"p99":2.52,"GB":2,"s":2.2},{"slot":3,"mode":"buffered","inflight":4,"GBps":2.93,"p50":1.02,"p99":3.13,"GB":2,"s":0.7},{"slot":4,"mode":"direct","inflight":4,"GBps":4.29,"p50":0.73,"p99":3.25,"GB":2,"s":0.5},{"slot":5,"mode":"buffered","inflight":16,"GBps":5.93,"p50":2.09,"p99":7.32,"GB":2,"s":0.3},{"slot":6,"mode":"direct","inflight":16,"GBps":5.32,"p50":2.07,"p99":13.79,"GB":2,"s":0.4},{"slot":7,"mode":"buffered","inflight":32,"GBps":5.82,"p50":4.08,"p99":17.64,"GB":2,"s":0.3},{"slot":8,"mode":"direct","inflight":32,"GBps":2.87,"p50":7.63,"p99":37.63,"GB":2,"s":0.7}]}
+end 2026-10-12T19:37:41.7752485-04:00
+avail MB: 58388

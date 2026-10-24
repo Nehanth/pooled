@@ -1,0 +1,30 @@
+busy: 
+gpu: 0 %, 56 MiB
+start 2026-10-12T19:42:17.4517762-04:00
+1.1s [a] share-b joined (nvidia blackwell, 8 GB)
+1.4s [a] Qwen3.8 Flash Next · Q4: layer split share-a 1+embed · share-b 47
+1.4s [a] the n-gram table (26.8 GB, layer 1): share-b reads it (from its own copy when it has one, else by HTTP range: its log says which); whether it has the disk for it is not reported
+1.4s [a] share-b offloads layers 3-47 with their experts in RAM (19.6 GB parked, 2.6 GB of GPU cache); layers 17-47 read theirs from disk (2.4 GB RAM cache)
+1.4s [a] speculative decoding is off while experts are offloaded: plain decoding is faster there (POOLED_OFFLOAD_SPEC=1 turns it on)
+1.5s [b] dealt layers 1-47 of qwen3.8-flash; next: host
+1.5s [b] offloading the experts of layers 3-47 to RAM (layers 17-47: read from disk) (2.6 GB of GPU cache)
+4.2s [a] autotune WG=128 ROWS=8
+5.3s [b] autotune WG=128 ROWS=8
+5.3s [b] expert offload: layers 3-16 park their experts in RAM; layers 17-47 read theirs from disk (2.4 GB RAM cache), 2.56 GB GPU cache
+19.4s [a] Qwen3.8-Flash-Next layers 0-0 + embedding/head: 4.1 GB (weights, K/V, the CPU embedding, upload staging)
+19.5s [a] host layers 0-0 + embedding/head ready in 18.1 s
+77.7s [b] n-gram table: 26.8 GB, rows read from C:\llm\models\q38flash\Qwen3.8-Flash-Next-Q4_0-00001-of-00003.gguf
+80.0s [b] Qwen3.8-Flash-Next layers 1-47: 9.4 GB (weights less the offloaded experts, the expert cache, K/V, the CPU embedding, upload staging), the n-gram layer here
+80.1s [b] expert offload: 45 layers, 21 slots each (2.48 GiB) + region 0.00 GiB, parked 19.63 GiB in 19.64 GiB of buffers
+80.1s [b] layers 1-47 ready in 78.7 s
+80.2s [a] room online · 2 device(s), 48 layers
+80.2s online: {"L":48,"ranges":[[0,1],[1,48]],"names":["share-a","share-b"]} in 79 s
+217.8s two-sum: MATCH {"verdict":"MATCH","n":64,"prompt":23,"tps":0.69,"prefillS":45,"wallS":137.6,"diskReads":10750,"diskMiB":28345,"diskWaitS":22.94,"t1Copies":2255,"lookups":39150,"hits":20250,"misses":18900,"diskWaitPerTokMs":263.64,"wallPerTokMs":1581.6,"diskShareOfWall":0.167,"decodeMs":92593}
+217.8s [b] expert offload: 45 layers, 21 slots each (2.48 GiB) + region 0.00 GiB, parked 19.63 GiB in 19.64 GiB of buffers; 3915 cuts, hits 51.7% (20250/39150), 50972 MiB copied to the pools, 0 region cuts (0 MiB), 0 whole-layer loads (0.0 GiB); 31 disk layers: 10750 expert reads, 28345 MiB from the file, 22.94 s waiting; RAM cache 898/918 experts (2.36 of 2.36 GiB): 2255 hits, 3041 admitted, 7709 first misses, 0 with no free slot, 2143 evicted
+289.7s bash: MATCH {"verdict":"MATCH","n":22,"prompt":27,"tps":0.7,"prefillS":40.62,"wallS":71.9,"diskReads":5143,"diskMiB":13561,"diskWaitS":11.64,"t1Copies":1550,"lookups":22050,"hits":12609,"misses":9441,"diskWaitPerTokMs":237.58,"wallPerTokMs":1467.2,"diskShareOfWall":0.162,"decodeMs":31263}
+289.7s [b] expert offload: 45 layers, 21 slots each (2.48 GiB) + region 0.00 GiB, parked 19.63 GiB in 19.64 GiB of buffers; 6120 cuts, hits 53.7% (32859/61200), 76341 MiB copied to the pools, 0 region cuts (0 MiB), 0 whole-layer loads (0.0 GiB); 31 disk layers: 15893 expert reads, 41905 MiB from the file, 34.58 s waiting; RAM cache 898/918 experts (2.36 of 2.36 GiB): 3805 hits, 3911 admitted, 11982 first misses, 0 with no free slot, 3013 evicted
+365.7s eos-mid: MATCH {"verdict":"MATCH","n":20,"prompt":31,"tps":0.7,"prefillS":47.3,"wallS":76.1,"diskReads":5646,"diskMiB":14887,"diskWaitS":11.45,"t1Copies":1372,"lookups":22950,"hits":12685,"misses":10265,"diskWaitPerTokMs":224.59,"wallPerTokMs":1491.6,"diskShareOfWall":0.151,"decodeMs":28763}
+365.7s [b] expert offload: 45 layers, 21 slots each (2.48 GiB) + region 0.00 GiB, parked 19.63 GiB in 19.64 GiB of buffers; 8415 cuts, hits 54.1% (45544/84150), 104001 MiB copied to the pools, 0 region cuts (0 MiB), 0 whole-layer loads (0.0 GiB); 31 disk layers: 21539 expert reads, 56792 MiB from the file, 46.03 s waiting; RAM cache 898/918 experts (2.36 of 2.36 GiB): 5177 hits, 5032 admitted, 16507 first misses, 0 with no free slot, 4134 evicted
+{"hostGB":3,"nodeGB":8,"nodeRam":24,"disk":true,"cases":{"two-sum":{"verdict":"MATCH","n":64,"prompt":23,"tps":0.69,"prefillS":45,"wallS":137.6,"diskReads":10750,"diskMiB":28345,"diskWaitS":22.94,"t1Copies":2255,"lookups":39150,"hits":20250,"misses":18900,"diskWaitPerTokMs":263.64,"wallPerTokMs":1581.6,"diskShareOfWall":0.167,"decodeMs":92593},"bash":{"verdict":"MATCH","n":22,"prompt":27,"tps":0.7,"prefillS":40.62,"wallS":71.9,"diskReads":5143,"diskMiB":13561,"diskWaitS":11.64,"t1Copies":1550,"lookups":22050,"hits":12609,"misses":9441,"diskWaitPerTokMs":237.58,"wallPerTokMs":1467.2,"diskShareOfWall":0.162,"decodeMs":31263},"eos-mid":{"verdict":"MATCH","n":20,"prompt":31,"tps":0.7,"prefillS":47.3,"wallS":76.1,"diskReads":5646,"diskMiB":14887,"diskWaitS":11.45,"t1Copies":1372,"lookups":22950,"hits":12685,"misses":10265,"diskWaitPerTokMs":224.59,"wallPerTokMs":1491.6,"diskShareOfWall":0.151,"decodeMs":28763}},"loadS":79.018,"split":{"L":48,"ranges":[[0,1],[1,48]],"names":["share-a","share-b"]},"pass":true}
+365.7s [a] share-b left
+end 2026-10-12T19:48:29.0740398-04:00

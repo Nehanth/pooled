@@ -1,0 +1,4 @@
+mac20+pc(10,43,disk) {"ranges":[[0,13],[13,48]],"off":[null,{"lo":17,"hi":48,"layers":31,"slots":30,"ramGB":40.9,"t1GB":0}]}
+mac24+pc(10,43,disk) {"ranges":[[0,16],[16,48]],"off":[null,{"lo":18,"hi":48,"layers":30,"slots":68,"ramGB":39.6,"t1GB":0}]}
+mac20+pc(10,32,disk) {"ranges":[[0,20],[20,48]],"off":[{"lo":7,"hi":20,"diskLo":7,"layers":13,"slots":244,"ramGB":0,"t1GB":1.3,"diskOnly":true},{"lo":25,"hi":48,"diskLo":46,"layers":23,"slots":23,"ramGB":27.7,"t1GB":2.49}]}
+mac20+pc(10,24,disk) {"ranges":[[0,23],[23,48]],"off":[{"lo":9,"hi":23,"diskLo":9,"layers":14,"slots":147,"ramGB":0,"t1GB":1.27,"diskOnly":true},{"lo":28,"hi":48,"diskLo":43,"layers":20,"slots":29,"ramGB":19.8,"t1GB":2.44}]}
