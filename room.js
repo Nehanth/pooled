@@ -1317,15 +1317,24 @@ async function pathOf(id) {
 // a link is gone (closed, or dropped as silent): on the host the device left; workers wait for the roster
 // (e.dead: it was dropped for silence, "stopped responding")
 // the host this device followed left the room (the creator's roster dropped it): free for the next Start. A device
-// that only asked (a guest, no layers) goes back to the picker instead of a stale online screen; a creator that
-// left ends the room as before (hostGone)
+// that asked or held layers goes back to the picker instead of a stale online screen. A load in flight
+// stops at its next tensor (or when it finishes); a creator that left ends the room as before (hostGone)
 function followedHostLeft() {
   const was = ai.dealer; ai.pressedHere = false;
   ai.dealer = null; ai.dealerFresh = false; ai.dealerActive = false; ai.startAt = null; clearTimeout(ai.startWait); ai.startWait = null;
-  if (was === PREFIX + roomCode || ai.role === "host" || ai.engine || ai.loadingShard) return;
+  if (was === PREFIX + roomCode || ai.role === "host") return;
+  if (ai.workerLoad) ai.workerLoad.hostLeft = true;
+  ai.startFailed = "the model's host left the room";   // cancel a load at its next tensor
+  if (!ai.loadingShard) workerStopped();
+  ai.heldGB = null; ai.outWhy = {}; paintHeld();
+  failWaiters(new Error(ai.startFailed));
   if (ai.hostId === was) ai.hostId = null;
+  modelHostLeftView();
+}
+function modelHostLeftView() {
   aiLoading(false);
   $("ai-panel").classList.remove("online");
+  $("ai-row").style.display = "none";
   $("ai-start").disabled = false; $("ai-model").disabled = false; updateCluster();
   aiStatus("the model's host left the room: press Start to start it again");
 }
@@ -3597,6 +3606,7 @@ function slowestLoadProgress() {
 async function aiLoadPace() {
   if (ai.startFailed) throw new Error(ai.startFailed);   // the start was stopped (aiStartStopped): no point loading the rest
   while (ai.gpuPct < 100 && ai.gpuPct > slowestLoadProgress() + 4) {
+    if (ai.startFailed) throw new Error(ai.startFailed);   // cancellation also interrupts a pacing wait
     aiStatus("Waiting a moment so every device finishes together");
     if (!lc.paced) { lc.paced = true; lcPaint(true); }
     await new Promise((r) => setTimeout(r, 250));
@@ -4111,7 +4121,7 @@ function aiLoadFailed(from, name, message) {
 function workerStopped() {
   if (ai.role !== "worker") return;
   closeEngine();
-  ai.role = null; ai.range = null;
+  ai.role = null; ai.range = null; ai.held = null; ai.hostId = null; ai.next = null; ai.workerLoad = null;
   try { ai.device?.destroy(); } catch {}
   ai.device = null;
 }
@@ -5391,6 +5401,7 @@ async function aiOnData(from, d) {
         ai.next = d.next; ai.hostId = d.host; ensureLink(d.next);
         break;
       }
+      const load = ai.workerLoad = { hostLeft: false };
       setModelValue(d.model);
       ai.role = "worker";
       ai.next = d.next;
@@ -5410,12 +5421,15 @@ async function aiOnData(from, d) {
           ai.loadingShard = true; ai.loadKey = loadKey;
           // d.kv: the host's KV format (a host without it: this device's own ?kv=, as before)
           try { await aiLoadShard(d.model || "smollm-135m", d.range, false, false, d.ctx || maxSeqFor(d.model), kvForLoad(d.model, d.kv, KV_ASK), d.offload || null, d.flash || null); } finally { ai.loadingShard = false; }
+          if (ai.workerLoad !== load) break;
           if (ai.startFailed) throw new Error(ai.startFailed);
           ai.held = { model: d.model, range: [d.range[0], d.range[1]], ctx: d.ctx, kv: kvForLoad(d.model, d.kv, KV_ASK), offload: d.offload || null, flash: d.flash || null };
         }
         keepAwake();
         if (!(await ensureLink(d.next))) throw new Error("could not connect to the next device in the chain");
+        if (ai.workerLoad !== load) break;   // its host left while the link opened
         const slots = await ckptRestore();   // this device's part of the room's checkpoints, if it saved any before a reload
+        if (ai.workerLoad !== load) break;   // its host left while checkpoints restored
         aiStatus(`layers ${d.range[0]}–${d.range[1] - 1} ready · syncing with the room…`);
         $("ldg-title").textContent = `layers ${d.range[0]}–${d.range[1] - 1} ready`;   // the card stays up as it is (Starting) until ai-ready-all
         $("ldg-sub").textContent = "syncing with the rest of the room";
@@ -5427,6 +5441,8 @@ async function aiOnData(from, d) {
         // does not (room/pipeline.js chainSlow). Older hosts ignore them
         sendTo(ai.hostId, { t: "ai-ready", slots, ckpt: ai.engine?.saveSlot ? 1 : 0, ...flashReadyFields(ai.engine, d.model), ...(ai.engine?.batch !== undefined ? { batch: ai.engine.batch ? 1 : 0 } : {}) });
       } catch (err) {
+        if (ai.workerLoad !== load) break;   // a later deal owns this device now
+        if (load.hostLeft) { workerStopped(); modelHostLeftView(); break; }
         if (onLoadError(ai.startFailed) === "stopped") { workerStopped(); break; }   // the host stopped the start (ai-start-failed): this load stopped with it
         closeEngine();
         if (err.noDisk) {
