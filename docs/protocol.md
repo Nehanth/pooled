@@ -2,6 +2,10 @@
 
 Browsers in a room form a WebRTC mesh (PeerJS signaling for the introduction only). The host registers with PeerJS as `pooled-room-<CODE>`; before the rename to Pooled the prefix was `swarmllm-room-`, so a pooled.run tab and an old swarmllm.ai tab never meet in one room. One browser is the **host**: it owns the conversation, the tokenizer, the embedding table, the LM head and the sampler. The others are **workers** holding contiguous layer ranges; together they form a **chain** in layer order, with the last worker sending back to the host. By memory, phones hold no layers at all while the host and the other computers can hold the model (`phonesToLeaveOut`; `?phonelayers=1` overrides): they join as ask-only guests.
 
+## When a member model host leaves
+
+If the device running the model is a member rather than the room's creator, leaving or reloading it stops that model. Surviving devices free its layers and return to the model picker. A load still in progress stops before the device becomes ready. Once it stops, anyone can press Start and the room chooses its current model host and deals the layers again. Losing only a direct link does not stop the model while the creator still lists its host in the room; reconnecting devices keep the existing recovery path.
+
 ## Lifecycle
 
 | Message | Direction | Meaning |

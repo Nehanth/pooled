@@ -45,6 +45,9 @@
 //                  model out again by itself, the chat stays on screen under a slim "Adding late to the model" line,
 //                  and the room comes back with late holding layers.
 //   restart        the pick's start fails (a worker reports it couldn't load): the pick can press Start again.
+//   hostgone / hostreload  a member model host leaves or reloads: loaded workers free their layers,
+//                  return to the picker, and can start a new working model.
+//   hostgone-loading  the same while a worker load completes late: it cannot restore stale state.
 //   refforge       a member presses Start (relayed by the creator); another member sends the creator a refusal
 //                  for it, claiming to be the creator: the creator forwards it under the sender's real name, the
 //                  requester keeps waiting, and it comes online with the room's pick.
@@ -63,7 +66,7 @@ import { loadPlaywright, chromiumPath, GPU_ARGS, serveRepo } from "./engine_synt
 
 const argv = process.argv.slice(2);
 const arg = (k, d) => { const i = argv.indexOf("--" + k); return i >= 0 ? argv[i + 1] : d; };
-const ONLY = new Set((arg("only", "leftout,leftout-guest,leftout-lost-hello,rejoin,duplicate,takeover,hijack,slowstart,fresh,autoadd,restart,refforge,loaddrop-back,loaddrop-gone")).split(","));
+const ONLY = new Set((arg("only", "leftout,leftout-guest,leftout-lost-hello,rejoin,duplicate,takeover,hijack,slowstart,fresh,autoadd,restart,refforge,loaddrop-back,loaddrop-gone,hostgone,hostreload,hostgone-loading")).split(","));
 const ROOT = path.resolve(new URL(".", import.meta.url).pathname, "../..");
 const PORT = +arg("port", 8191), SIG = PORT + 1;
 const MODEL_KEY = "qwen3.8-27b";
@@ -104,11 +107,16 @@ if (!room.includes(HELLO_ANCHOR)) { console.error(`room.js has no ${JSON.stringi
 // window.__releaseHostLoad() (a slow host: its engine not up yet, as while it loads; it ends when the test says)
 const LOAD_ANCHOR = "    try { await aiLoadShard(modelKey, ranges[0], true, true, ROOM_CTX, ROOM_KV, offMsg(myOff), flash); }";
 if (!room.includes(LOAD_ANCHOR)) { console.error(`room.js has no ${JSON.stringify(LOAD_ANCHOR)}: update tests/e2e/room_state.mjs`); process.exit(2); }
-fs.writeFileSync(extra["/room.js"], room.replace(ANCHOR, '  conn.on("close", () => { if (window.__delayClose) setTimeout(onClose, window.__delayClose); else onClose(); });\n')
+const WORKER_LOAD_ANCHOR = room.split("\n").find((line) => line.startsWith("          try { await aiLoadShard(d.model"));
+if (!WORKER_LOAD_ANCHOR) throw new Error("worker load hook missing");
+const workerRoom = room.replace(WORKER_LOAD_ANCHOR,
+  WORKER_LOAD_ANCHOR.replace('; } finally', '; if (window.__holdWorkerLoad) { window.__workerLoadHeld = true; await new Promise((r) => { window.__releaseWorkerLoad = r; }); } } finally'));
+fs.writeFileSync(extra["/room.js"], workerRoom.replace(ANCHOR, '  conn.on("close", () => { if (window.__delayClose) setTimeout(onClose, window.__delayClose); else onClose(); });\n')
   .replace(HELLO_ANCHOR, HELLO_ANCHOR + "      if (window.__loseFirstHello && e && !e.lostHello) { e.lostHello = 1; break; }\n")
   .replace(LOAD_ANCHOR, "    try { await aiLoadShard(modelKey, ranges[0], true, true, ROOM_CTX, ROOM_KV, offMsg(myOff), flash); if (window.__holdHostLoad) { const e = ai.engine; ai.engine = null; await new Promise((r) => { window.__hostLoadHeld = true; window.__releaseHostLoad = r; }); ai.engine = e; } }")
   + '\nwindow.__dropLinks = () => { for (const id of [...conns.keys()]) dropLink(id, "e2e: the link dropped"); };\n'
   // window.__send(id, msg): send a raw room message (a member forging host messages); __dealer(): the host this device checked
+  + '\nwindow.__workerState = () => ({ role: ai.role, engine: !!ai.engine, device: !!ai.device, loading: !!ai.loadingShard, host: ai.hostId, next: ai.next, held: ai.held });\n'
   + 'window.__send = (id, m) => sendTo(id, m); window.__links = () => [...conns.keys()]; window.__dealer = () => ai.dealer; window.__hostId = () => ai.hostId; window.__myId = () => peer.id; window.__link = (id) => ensureLink(id, 20000);\n');
 // globalThis.__e2eGraceMs (an init script): the rejoin grace (room/resume.js REJOIN_GRACE_MS, 60 s)
 const resume = fs.readFileSync(path.join(ROOT, "room/resume.js"), "utf8"), GRACE_ANCHOR = "export const REJOIN_GRACE_MS = 60000;";
@@ -470,6 +478,49 @@ async function restart() {
   check("restart: the pick presses Start again and the room comes online", up, JSON.stringify({ big: (await view(big)).status, w: (await view(w)).status }));
 }
 
+// A member model host disappears: both the creator and a second worker must be reusable.
+async function hostleft(label, { reload = false, loading = false } = {}) {
+  const desk = await device("desk"), big = await device("big"), w = await device("w");
+  await openRoom([[desk, "desk", 8, "&gbps=1&ctx=2048"], [big, "big", 24, "&gbps=100&ctx=2048"], [w, "w", 12, "&gbps=1&ctx=2048"]], "&split=memory");
+  if (loading) await w.evaluate(() => { window.__holdWorkerLoad = true; });
+  await startModel(big, "memory");
+  const ready = loading
+    ? await w.waitForFunction(() => window.__workerLoadHeld, null, { timeout: 300000 }).then(() => true, () => false)
+    : await online(big) && await online(desk) && await online(w);
+  check(`${label}: member host has loaded or loading workers`, ready, JSON.stringify(await Promise.all([desk, big, w].map(async (p) => ({ view: await view(p), log: await roomLog(p), errors: p.errs })))));
+  if (!ready) return;
+  const workers = await Promise.all([desk, w].map((p) => p.evaluate(() => window.__workerState())));
+  check(`${label}: both survivors hold worker layers`, workers.every((s) => s.role === "worker" && (s.engine || s.loading)), JSON.stringify(workers));
+  const bigId = await big.evaluate(() => window.__myId());
+  if (reload) {
+    await big.reload(); await wired(big);
+  } else {
+    const ctx = big.context(); ctxs.splice(ctxs.indexOf(ctx), 1); await ctx.close();
+  }
+  for (const p of [desk, w]) {
+    await p.waitForFunction((id) => window.__dealer() !== id, bigId, { timeout: 60000 });
+  }
+  if (loading) {
+    await w.evaluate(() => { window.__holdWorkerLoad = false; window.__releaseWorkerLoad(); });
+    await w.waitForFunction(() => !window.__workerState().loading, null, { timeout: 300000 });
+  }
+  let freed = true;
+  for (const p of [desk, w]) {
+    await p.waitForFunction(() => !window.__workerState().loading, null, { timeout: 60000 }).catch(() => {});
+    const v = await viewWhen(p, (v) => v.picker && !v.online && !v.loading);
+    const state = await p.evaluate(() => window.__workerState());
+    const clean = v.inRoom && v.picker && !v.online && !v.loading && !state.engine && !state.loading && !state.role && !state.device;
+    check(`${label}: ${p.label} frees abandoned layers and returns to picker`, clean, JSON.stringify({ v, state }));
+    freed &&= clean;
+  }
+  if (!freed) return;
+  // A surviving worker can start again; the room's current pick deals the model afresh.
+  await startModel(w, "memory");
+  const up = await online(desk, 300000) && await online(w, 60000);
+  check(`${label}: a surviving worker can restart the room`, up, JSON.stringify(await view(w)));
+  if (up) check(`${label}: the restarted room answers`, !!(await ask(w, "hello again")));
+}
+
 async function refforge() {
   const desk = await device("desk"), big = await device("big"), w = await device("w"), mal = await device("mal");
   await openRoom([[desk, "desk", 8], [big, "big", 24], [w, "w", 12], [mal, "mal", 4]]);
@@ -539,7 +590,7 @@ async function loaddrop(label, { hostGB, workerGB, back }) {
 let code = 1;
 try {
   for (const [name, fn] of [["leftout", () => leftout("leftout", [12, 8, 8])], ["leftout-guest", () => leftout("leftout-guest", [8, 12, 8])],
-    ["leftout-lost-hello", () => leftout("leftout-lost-hello", [8, 12, 8], { loseHello: true })], ["rejoin", rejoin], ["duplicate", duplicate], ["takeover", takeover], ["hijack", hijack], ["slowstart", slowstart], ["fresh", fresh], ["autoadd", autoadd], ["restart", restart], ["refforge", refforge],
+    ["leftout-lost-hello", () => leftout("leftout-lost-hello", [8, 12, 8], { loseHello: true })], ["rejoin", rejoin], ["duplicate", duplicate], ["takeover", takeover], ["hijack", hijack], ["slowstart", slowstart], ["fresh", fresh], ["autoadd", autoadd], ["restart", restart], ["refforge", refforge], ["hostgone", () => hostleft("hostgone")], ["hostreload", () => hostleft("hostreload", { reload: true })], ["hostgone-loading", () => hostleft("hostgone-loading", { loading: true })],
     ["loaddrop-back", () => loaddrop("loaddrop-back", { hostGB: 24, workerGB: 12, back: true })],
     ["loaddrop-gone", () => loaddrop("loaddrop-gone", { hostGB: 24, workerGB: 12, back: false })]]) {
     if (!ONLY.has(name)) continue;
